@@ -9,6 +9,8 @@
 #include "phone_common_net.hpp"
 #include "phone_net.h"
 #include "phone_locale.h"
+#include "phone_fonts.h"
+#include "phone_audio.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
@@ -35,6 +37,7 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(err);
     phone_locale_init();
+    phone_audio_set_volume(phone_pref_get("mute", 0) ? 0 : phone_pref_get("vol", 60));
 
     phone_common_net_boot();
 
@@ -69,6 +72,14 @@ extern "C" void app_main(void)
         ESP_UTILS_CHECK_NULL_EXIT(stylesheet, "Create stylesheet failed");
     }
     if (stylesheet) {
+        /* The stock system fonts have no Vietnamese glyphs (app names, recents titles): swap the
+         * sizes covered by the settings app fonts, which are the same typeface */
+        auto &text = stylesheet->core.display.text;
+        for (int i = 0; i < text.default_fonts_num; i++) {
+            if (text.default_fonts[i].size_px >= 12 && text.default_fonts[i].size_px <= 28) {
+                text.default_fonts[i].font_resource = phone_font_by_size(text.default_fonts[i].size_px);
+            }
+        }
         ESP_UTILS_LOGI("Using stylesheet (%s)", stylesheet->core.name);
         ESP_UTILS_CHECK_FALSE_EXIT(phone->addStylesheet(stylesheet), "Add stylesheet failed");
         ESP_UTILS_CHECK_FALSE_EXIT(phone->activateStylesheet(stylesheet), "Activate stylesheet failed");

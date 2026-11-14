@@ -2,7 +2,7 @@
 #include "phone_fonts.h"
 
 #define PHONE_FONT_LIST(X) \
-    X(18) X(20) X(24) X(28)
+    X(12) X(14) X(16) X(18) X(20) X(24) X(28)
 
 #define X(n) extern const lv_font_t phone_font_##n;
 PHONE_FONT_LIST(X)

@@ -24,6 +24,7 @@
 #include "phone_net.h"
 #include "phone_power.h"
 #include "phone_locale.h"
+#include "phone_audio.h"
 #include "phone_app_settings.hpp"
 
 #define APP_NAME "Cài đặt"
@@ -41,6 +42,7 @@ enum Page {
     PAGE_WIFI,
     PAGE_PASS,
     PAGE_DISPLAY,
+    PAGE_SOUND,
     PAGE_LANG,
     PAGE_TZ,
     PAGE_ABOUT,
@@ -71,6 +73,9 @@ lv_obj_t *s_pass_title;
 lv_obj_t *s_pass_ta;
 lv_obj_t *s_about_vals[5];
 lv_obj_t *s_bri_val;
+lv_obj_t *s_vol_val;
+lv_obj_t *s_mute_sw;
+bool s_muted;
 lv_obj_t *s_wifi_sw;
 bool s_wifi_on = true;
 lv_obj_t *s_kb;
@@ -790,6 +795,39 @@ void on_brightness(lv_event_t *e)
     }
 }
 
+void on_volume(lv_event_t *e)
+{
+    int v = lv_slider_get_value(lv_event_get_target_obj(e));
+    if (s_muted) {
+        s_muted = false;
+        lv_obj_remove_state(s_mute_sw, LV_STATE_CHECKED);
+        phone_pref_set("mute", 0);
+    }
+    phone_audio_set_volume(v);
+    lv_label_set_text_fmt(s_vol_val, "%d%%", v);
+}
+
+void on_volume_done(lv_event_t *e)
+{
+    phone_pref_set("vol", lv_slider_get_value(lv_event_get_target_obj(e)));
+    phone_audio_beep();
+}
+
+void on_mute_toggle(lv_event_t *e)
+{
+    s_muted = lv_obj_has_state(lv_event_get_target_obj(e), LV_STATE_CHECKED);
+    phone_pref_set("mute", s_muted ? 1 : 0);
+    if (s_muted) {
+        phone_audio_set_volume(0);
+        lv_label_set_text(s_vol_val, T("Tắt tiếng", "Muted"));
+    } else {
+        int v = phone_pref_get("vol", 60);
+        phone_audio_set_volume(v);
+        lv_label_set_text_fmt(s_vol_val, "%d%%", v);
+        phone_audio_beep();
+    }
+}
+
 void refresh_wifi_status();
 
 void on_wifi_toggle(lv_event_t *e)
@@ -929,14 +967,17 @@ void build_slider_card(lv_obj_t *root, const char *title, const char *caption, i
     lv_obj_t *card = make_group(p, caption);
     lv_obj_set_style_pad_all(card, 16, 0);
     lv_obj_set_style_pad_row(card, 16, 0);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *val = lv_label_create(card);
     lv_label_set_text_fmt(val, "%d%%", value);
     lv_obj_set_style_text_color(val, lv_color_hex(COLOR_TEXT), 0);
     *val_out = val;
     lv_obj_t *s = lv_slider_create(card);
-    lv_obj_set_width(s, LV_PCT(100));
-    lv_obj_set_height(s, 24);
-    lv_obj_set_style_pad_all(s, 12, LV_PART_KNOB);
+    lv_obj_set_width(s, LV_PCT(92));
+    lv_obj_set_height(s, 14);
+    lv_obj_set_style_pad_all(s, 9, LV_PART_KNOB);
+    lv_obj_set_style_margin_bottom(s, 8, 0);
+    lv_obj_set_ext_click_area(s, 16);
     lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_ACCENT), LV_PART_KNOB);
     lv_slider_set_range(s, min, 100);
@@ -1024,6 +1065,7 @@ void build_ui()
 
     g = make_group(main_page, T("Thiết bị", "Device"));
     group_row(g, LV_SYMBOL_IMAGE, 0xF2994A, T("Màn hình", "Display"), nullptr, PAGE_DISPLAY);
+    group_row(g, LV_SYMBOL_AUDIO, 0xEB5757, T("Âm thanh", "Sound"), nullptr, PAGE_SOUND);
     group_end(g);
 
     g = make_group(main_page, T("Hệ thống", "System"));
@@ -1151,6 +1193,15 @@ void build_ui()
 
     build_slider_card(root, T("Màn hình", "Display"), T("Độ sáng", "Brightness"), PAGE_DISPLAY, 5,
                       phone_pref_get("bri", 100), on_brightness, on_brightness_done, &s_bri_val);
+    s_muted = phone_pref_get("mute", 0) != 0;
+    build_slider_card(root, T("Âm thanh", "Sound"), T("Âm lượng", "Volume"), PAGE_SOUND, 0,
+                      phone_pref_get("vol", 60), on_volume, on_volume_done, &s_vol_val);
+    lv_obj_t *sound_opts = make_group(s_pages[PAGE_SOUND], T("Tùy chọn", "Options"));
+    s_mute_sw = switch_row(sound_opts, T("Tắt tiếng", "Mute"), s_muted, on_mute_toggle);
+    group_end(sound_opts);
+    if (s_muted) {
+        lv_label_set_text(s_vol_val, T("Tắt tiếng", "Muted"));
+    }
     lv_obj_t *lang = make_page(root, T("Ngôn ngữ", "Language"), PAGE_LANG);
     const char *lang_names[2] = {"Tiếng Việt", "English"};
     for (int i = 0; i < 2; i++) {
