@@ -460,6 +460,9 @@ void group_end(lv_obj_t *card)
 
 void stop_auto_connect()
 {
+    /* The app's own state is stale until the Wi-Fi page has been open: ask the service first,
+     * otherwise an established link would be dropped here */
+    wifi_sync_state();
     if (s_wifi_state.load() == WIFI_CONNECTED) {
         return;
     }
