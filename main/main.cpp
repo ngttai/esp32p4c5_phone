@@ -7,6 +7,9 @@
 #include "bsp/esp-bsp.h"
 #include "esp_brookesia.hpp"
 #include "phone_common_net.hpp"
+#include "phone_net.h"
+#include "phone_locale.h"
+#include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
 #   undef ESP_UTILS_LOG_TAG
@@ -24,11 +27,20 @@ extern "C" void app_main(void)
 {
     ESP_UTILS_LOGI("Display ESP-Brookesia phone demo");
 
+    /* NVS holds the settings app preferences (language, time zone, brightness, saved Wi-Fi) */
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+    phone_locale_init();
+
     phone_common_net_boot();
 
     /* Start display (LVGL adapter + panel + touch) */
     ESP_UTILS_CHECK_NULL_EXIT(bsp_display_start(), "Start display failed");
-    ESP_UTILS_CHECK_ERROR_EXIT(bsp_display_backlight_on(), "Turn on display backlight failed");
+    ESP_UTILS_CHECK_ERROR_EXIT(bsp_display_brightness_set(phone_pref_get("bri", 100)), "Turn on display backlight failed");
 
     /* Configure GUI lock */
     LvLock::registerCallbacks([](int timeout_ms) {
@@ -76,8 +88,12 @@ extern "C" void app_main(void)
         ESP_UTILS_CHECK_FALSE_EXIT(phone->initAppFromRegistry(inited_apps), "Init app registry failed");
         ESP_UTILS_CHECK_FALSE_EXIT(phone->installAppFromRegistry(inited_apps), "Install app registry failed");
 
-        /* Create a timer to update the clock */
+        /* Wi-Fi service: brings the ESP32-C5 up in the background and reconnects to saved networks */
+        phone_net_start();
+
+        /* Create a timer to update the clock and the Wi-Fi icon */
         lv_timer_create([](lv_timer_t *t) {
+            static int s_wifi = -1;
             time_t now;
             struct tm timeinfo;
             Phone *phone = (Phone *)t->user_data;
@@ -91,6 +107,17 @@ extern "C" void app_main(void)
                 phone->getDisplay().getStatusBar()->setClock(timeinfo.tm_hour, timeinfo.tm_min),
                 "Refresh status bar failed"
             );
+
+            phone_net_status_t st = {};
+            phone_net_get_status(&st);
+            int wifi = 0;
+            if (st.wifi_connected) {
+                wifi = st.rssi >= -60 ? 3 : (st.rssi >= -72 ? 2 : 1);
+            }
+            if (wifi != s_wifi) {
+                s_wifi = wifi;
+                phone->getDisplay().getStatusBar()->setWifiIconState(wifi);
+            }
         }, 1000, phone);
     }
 
