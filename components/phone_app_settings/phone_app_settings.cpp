@@ -1050,6 +1050,7 @@ void build_ui()
     memset(s_tz_check, 0, sizeof(s_tz_check));
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
+    s_saved_sig[0] = '\0';   /* the saved list is rebuilt from scratch with the new widgets */
 
     lv_obj_t *scr = lv_screen_active();
     lv_obj_t *root = lv_obj_create(scr);

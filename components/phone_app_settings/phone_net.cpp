@@ -186,18 +186,7 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT) {
         if (id == WIFI_EVENT_STA_START) {
-            bool go;
-            {
-                Lock l;
-                go = s_list.count > 0;
-                if (go) {
-                    s_auto = true;
-                    s_try = 0;
-                }
-            }
-            if (go) {
-                start_attempt(0);
-            }
+            phone_net_enable();
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             bool retry;
             {
@@ -220,6 +209,7 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
         bool have_ap = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
         s_user_op = false;
         s_auto = true;
+        esp_timer_stop(s_retry);
         {
             Lock l;
             s_st.wifi_connected = true;
@@ -251,7 +241,8 @@ void retry_cb(void *)
     int idx;
     {
         Lock l;
-        if (!s_auto || s_user_op || s_list.count == 0) {
+        /* A connect that succeeded after this retry was armed must not be torn down */
+        if (!s_auto || s_user_op || s_list.count == 0 || s_st.wifi_connected) {
             return;
         }
         idx = s_try;
@@ -349,7 +340,8 @@ extern "C" void phone_net_enable(void)
     bool go;
     {
         Lock l;
-        go = s_list.count > 0;
+        /* ESP-Hosted reports STA_START more than once: do not restart an attempt in progress */
+        go = s_list.count > 0 && !s_st.wifi_connected && !s_st.wifi_connecting;
         if (go) {
             s_user_op = false;
             s_auto = true;
