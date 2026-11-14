@@ -1,0 +1,15 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf: ">=6.1"
+
+  esp32p4c5_bsp:
+    version: "*"
+    override_path: "../../../bsp/esp32p4c5_bsp"
+
+  brookesia_core:
+    version: "*"
+    override_path: "../components/brookesia_core"
+
+  brookesia_app_squareline_demo:
+    version: "*"
+    override_path: "../components/brookesia_app_squareline_demo"
