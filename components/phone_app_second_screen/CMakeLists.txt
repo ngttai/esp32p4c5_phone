@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS phone_app_second_screen.cpp phone_second_screen_icon.c
     INCLUDE_DIRS .
-    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings esp_driver_jpeg esp_timer
+    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings esp_driver_jpeg esp_driver_ppa esp_timer
     WHOLE_ARCHIVE
 )
 

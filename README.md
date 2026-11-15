@@ -22,7 +22,7 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
   ```
   ffmpeg -i in.mp4 -vf scale=800:480 -r 20 -c:v mjpeg -q:v 5 -pix_fmt yuvj420p -c:a pcm_s16le -ar 22050 -ac 1 out.avi
   ```
-- **Second screen app**: the board as a 480 x 800 USB display with touch for a PC, on the USB HS Type-C socket (high-speed device 303A:2986, "udisp" protocol of the [xfz1986 USB graphic driver](https://github.com/chuanjinpang/win10_idd_xfz1986_usb_graphic_driver_display), for Windows and Linux). The PC sends JPEG pictures, decoded by the hardware decoder; touches go back as a HID touch screen. Measured: about 8.6 MB/s from the PC, 30 to 58 pictures per second shown.
+- **Second screen app**: the board as a USB display with touch for a PC, 480 x 800 portrait or 800 x 480 landscape (turned by the PPA), on the USB HS Type-C socket (high-speed device 303A:2986, "udisp" protocol of the [xfz1986 USB graphic driver](https://github.com/chuanjinpang/win10_idd_xfz1986_usb_graphic_driver_display), for Windows and Linux). The PC sends JPEG pictures, decoded by the hardware decoder; touches go back as a HID touch screen. Measured: about 8.6 MB/s from the PC, 30 to 58 pictures per second shown.
 - **Files app**: browse the microSD card, see the details of a file, delete files and empty folders.
 - **Lock screen**: flip clock, date, Wi-Fi and battery, slide to unlock, charging effect. The wallpaper is the launcher one, blurred at boot.
 - **Screen power**: the screen dims after the timeout, then goes off with the lock screen up. While it is off, LVGL is paused and Wi-Fi uses modem sleep.

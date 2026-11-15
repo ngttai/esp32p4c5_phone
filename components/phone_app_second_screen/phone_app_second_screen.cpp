@@ -10,12 +10,16 @@
  * JPEG pictures are decoded by the hardware decoder into one of two RGB565 buffers, shown by an
  * LVGL image on the system layer, above the status and navigation bars.
  *
+ * Landscape mode tells the PC 800 x 480 instead: the decoded picture is turned 90 degrees by the
+ * PPA and the touches are turned back, so the board is used on its side.
+ *
  * Connect the PC to the USB HS Type-C socket. The port is shared with the Type-A host socket.
  */
 #include <atomic>
 #include <cstdio>
 #include <cstring>
 #include "driver/jpeg_decode.h"
+#include "driver/ppa.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -50,8 +54,10 @@ namespace {
 
 const char *TAG = "phone_screen2";
 
-constexpr int SCREEN_W = 480;
+constexpr int SCREEN_W = 480;            // panel
 constexpr int SCREEN_H = 800;
+/* How the landscape picture is turned onto the portrait panel (counter-clockwise), as in the Video app */
+constexpr ppa_srm_rotation_angle_t LANDSCAPE_ROTATION = PPA_SRM_ROTATION_ANGLE_90;
 constexpr int JPEG_QUALITY = 5;             // 1..10, asked from the PC driver
 constexpr size_t FRAME_MAX = 300 * 1024;    // larger pictures are skipped
 constexpr int TOUCH_POINTS = 5;             // fingers in the HID report (one is used)
@@ -88,18 +94,22 @@ enum { REPORT_TOUCH = 1, REPORT_MAX_COUNT };
         HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE), HID_COLLECTION_END,
 
 /* Touch screen with five contacts and the "contact count maximum" feature */
-const uint8_t HID_REPORT_DESC[] = {
-    HID_USAGE_PAGE(HID_USAGE_PAGE_DIGITIZER), HID_USAGE(0x04),
-    HID_COLLECTION(HID_COLLECTION_APPLICATION), HID_REPORT_ID(REPORT_TOUCH)
-    FINGER_USAGE(SCREEN_W, SCREEN_H) FINGER_USAGE(SCREEN_W, SCREEN_H) FINGER_USAGE(SCREEN_W, SCREEN_H)
-    FINGER_USAGE(SCREEN_W, SCREEN_H) FINGER_USAGE(SCREEN_W, SCREEN_H) HID_USAGE(0x54),
-    HID_LOGICAL_MAX(127), HID_REPORT_COUNT(1), HID_REPORT_SIZE(8),
-    HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
-    HID_REPORT_ID(REPORT_MAX_COUNT) HID_USAGE(0x55), HID_REPORT_COUNT(1),
-    HID_LOGICAL_MAX(0x10),
-    HID_FEATURE(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),
+#define TOUCH_SCREEN_DESC(width, height)                                                              \
+    HID_USAGE_PAGE(HID_USAGE_PAGE_DIGITIZER), HID_USAGE(0x04),                                        \
+    HID_COLLECTION(HID_COLLECTION_APPLICATION), HID_REPORT_ID(REPORT_TOUCH)                           \
+    FINGER_USAGE(width, height) FINGER_USAGE(width, height) FINGER_USAGE(width, height)               \
+    FINGER_USAGE(width, height) FINGER_USAGE(width, height) HID_USAGE(0x54),                          \
+    HID_LOGICAL_MAX(127), HID_REPORT_COUNT(1), HID_REPORT_SIZE(8),                                    \
+    HID_INPUT(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                                                \
+    HID_REPORT_ID(REPORT_MAX_COUNT) HID_USAGE(0x55), HID_REPORT_COUNT(1),                             \
+    HID_LOGICAL_MAX(0x10),                                                                            \
+    HID_FEATURE(HID_DATA | HID_VARIABLE | HID_ABSOLUTE),                                              \
     HID_COLLECTION_END
-};
+
+/* The touch area is the screen as the PC sees it: one descriptor per orientation, same length */
+const uint8_t HID_REPORT_DESC[] = {TOUCH_SCREEN_DESC(SCREEN_W, SCREEN_H)};
+const uint8_t HID_REPORT_DESC_LANDSCAPE[] = {TOUCH_SCREEN_DESC(SCREEN_H, SCREEN_W)};
+static_assert(sizeof(HID_REPORT_DESC) == sizeof(HID_REPORT_DESC_LANDSCAPE), "the configuration descriptor holds one length");
 
 constexpr int CONFIG_LEN = TUD_CONFIG_DESC_LEN + TUD_VENDOR_DESC_LEN + TUD_HID_DESC_LEN;
 
@@ -173,6 +183,7 @@ constexpr uint8_t TYPE_JPG = 3;
 
 lv_obj_t *s_root;
 lv_obj_t *s_start_btn;
+lv_obj_t *s_mode_btn[2];
 lv_obj_t *s_info;
 lv_obj_t *s_view;           // full screen, on the system layer, while running
 lv_obj_t *s_img;
@@ -185,6 +196,11 @@ TaskHandle_t s_decode_task;
 std::atomic<bool> s_decode_run;
 std::atomic<bool> s_decode_done;
 jpeg_decoder_handle_t s_dec;
+ppa_client_handle_t s_ppa;
+bool s_landscape;           // the PC sees 800 x 480
+int s_host_w, s_host_h;     // screen size told to the PC
+uint8_t *s_turn;            // decoded landscape picture, before it is turned
+size_t s_turn_size;
 uint8_t *s_in[2];           // JPEG data: one being received, one being decoded
 size_t s_in_size;
 uint8_t *s_out[2];          // RGB565 pictures: one on the screen, one being decoded
@@ -219,9 +235,32 @@ void decode_task(void *)
         }
         uint32_t len = 0;
         jpeg_decode_picture_info_t info = {};
-        if (jpeg_decoder_get_info(s_in[in], s_ready_len, &info) == ESP_OK && info.width == SCREEN_W &&
-                info.height == SCREEN_H &&
-                jpeg_decoder_process(s_dec, &cfg, s_in[in], s_ready_len, s_out[back], s_out_size, &len) == ESP_OK) {
+        bool ok = jpeg_decoder_get_info(s_in[in], s_ready_len, &info) == ESP_OK &&
+                  static_cast<int>(info.width) == s_host_w && static_cast<int>(info.height) == s_host_h;
+        if (ok && s_landscape) {
+            /* decode as sent, then turn it onto the portrait panel */
+            ppa_srm_oper_config_t op = {};
+            op.in.buffer = s_turn;
+            op.in.pic_w = s_host_w;
+            op.in.pic_h = s_host_h;
+            op.in.block_w = s_host_w;
+            op.in.block_h = s_host_h;
+            op.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+            op.out.buffer = s_out[back];
+            op.out.buffer_size = s_out_size;
+            op.out.pic_w = SCREEN_W;
+            op.out.pic_h = SCREEN_H;
+            op.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+            op.rotation_angle = LANDSCAPE_ROTATION;
+            op.scale_x = 1.0f;
+            op.scale_y = 1.0f;
+            op.mode = PPA_TRANS_MODE_BLOCKING;
+            ok = jpeg_decoder_process(s_dec, &cfg, s_in[in], s_ready_len, s_turn, s_turn_size, &len) == ESP_OK &&
+                 ppa_do_scale_rotate_mirror(s_ppa, &op) == ESP_OK;
+        } else if (ok) {
+            ok = jpeg_decoder_process(s_dec, &cfg, s_in[in], s_ready_len, s_out[back], s_out_size, &len) == ESP_OK;
+        }
+        if (ok) {
             if (bsp_display_lock(50)) {
                 if (s_img && s_decode_run) {
                     lv_image_set_src(s_img, &s_dsc[back]);
@@ -297,8 +336,14 @@ void send_touch()
     if (s_touch_down) {
         report.data[0].press_down = 1;
         report.data[0].index = 0;
-        report.data[0].x = static_cast<uint16_t>(s_touch_pt.x);
-        report.data[0].y = static_cast<uint16_t>(s_touch_pt.y);
+        if (s_landscape) {
+            /* back through the 90 degree turn: the left edge of the panel is the top of the PC screen */
+            report.data[0].x = static_cast<uint16_t>(SCREEN_H - 1 - s_touch_pt.y);
+            report.data[0].y = static_cast<uint16_t>(s_touch_pt.x);
+        } else {
+            report.data[0].x = static_cast<uint16_t>(s_touch_pt.x);
+            report.data[0].y = static_cast<uint16_t>(s_touch_pt.y);
+        }
         report.data[0].width = 8;
         report.data[0].height = 8;
         report.cnt = 1;
@@ -337,6 +382,12 @@ void free_buffers()
         free(s_in[i]);
         free(s_out[i]);
         s_in[i] = s_out[i] = nullptr;
+    }
+    free(s_turn);
+    s_turn = nullptr;
+    if (s_ppa) {
+        ppa_unregister_client(s_ppa);
+        s_ppa = nullptr;
     }
     if (s_dec) {
         jpeg_del_decoder_engine(s_dec);
@@ -399,6 +450,16 @@ bool start_screen()
     if (jpeg_new_decoder_engine(&eng_cfg, &s_dec) != ESP_OK) {
         return false;
     }
+    s_host_w = s_landscape ? SCREEN_H : SCREEN_W;
+    s_host_h = s_landscape ? SCREEN_W : SCREEN_H;
+    if (s_landscape) {
+        const ppa_client_config_t ppa_cfg = {.oper_type = PPA_OPERATION_SRM};
+        s_turn = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(static_cast<size_t>(s_host_w) * s_host_h * 2, &out_cfg,
+                                        &s_turn_size));
+        if (!s_turn || ppa_register_client(&ppa_cfg, &s_ppa) != ESP_OK) {
+            return false;
+        }
+    }
     s_ready = -1;
     s_frames = 0;
     s_dropped = 0;
@@ -447,7 +508,7 @@ bool start_screen()
     lv_label_set_text(x, LV_SYMBOL_CLOSE);
     lv_obj_center(x);
 
-    snprintf(s_vendor_str, sizeof(s_vendor_str), "esp32p4udisp0_R%dx%d_Ejpg%d", SCREEN_W, SCREEN_H, JPEG_QUALITY);
+    snprintf(s_vendor_str, sizeof(s_vendor_str), "esp32p4udisp0_R%dx%d_Ejpg%d", s_host_w, s_host_h, JPEG_QUALITY);
     tinyusb_config_t cfg = TINYUSB_DEFAULT_CONFIG();
     cfg.descriptor.device = &DEVICE_DESC;
     cfg.descriptor.qualifier = &QUALIFIER_DESC;
@@ -500,6 +561,23 @@ void on_timer(lv_timer_t *)
     }
 }
 
+void show_mode()
+{
+    for (int i = 0; i < 2; i++) {
+        lv_obj_set_style_bg_color(s_mode_btn[i], lv_color_hex(i == (s_landscape ? 1 : 0) ? COLOR_ACCENT : COLOR_CARD), 0);
+    }
+}
+
+void on_mode(lv_event_t *e)
+{
+    if (s_running) {
+        return;
+    }
+    s_landscape = reinterpret_cast<intptr_t>(lv_event_get_user_data(e)) != 0;
+    phone_pref_set("ss_land", s_landscape ? 1 : 0);
+    show_mode();
+}
+
 void build_ui()
 {
     lv_obj_t *root = lv_obj_create(lv_screen_active());
@@ -539,16 +617,40 @@ void build_ui()
     lv_obj_set_style_text_font(s_info, phone_font_by_size(18), 0);
     lv_obj_set_style_text_line_space(s_info, 6, 0);
     lv_label_set_text(s_info, T(
-                          "Máy trở thành màn hình USB 480 x 800 có cảm ứng cho máy tính.\n\n"
+                          "Máy trở thành màn hình USB có cảm ứng cho máy tính, dọc 480 x 800 hoặc ngang 800 x 480.\n\n"
                           "1. Cài driver xfz1986 udisp trên máy tính (Windows hoặc Linux).\n"
                           "2. Cắm cáp vào cổng USB HS (Type-C) của máy.\n"
                           "3. Bấm Bắt đầu.\n\n"
                           "Thoát: bấm nút X ở góc trên phải, hoặc bấm phím nguồn.",
-                          "The board becomes a 480 x 800 USB display with touch for a PC.\n\n"
+                          "The board becomes a USB display with touch for a PC, 480 x 800 portrait or 800 x 480 landscape.\n\n"
                           "1. Install the xfz1986 udisp driver on the PC (Windows or Linux).\n"
                           "2. Plug the cable into the USB HS (Type-C) socket of the board.\n"
                           "3. Press Start.\n\n"
                           "To leave: tap the X in the top right corner, or press the power key."));
+
+    /* portrait or landscape, as the PC sees the screen */
+    lv_obj_t *modes = lv_obj_create(root);
+    lv_obj_remove_style_all(modes);
+    lv_obj_set_size(modes, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(modes, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(modes, 12, 0);
+    static const char *const labels_vi[] = {"Dọc 480 x 800", "Ngang 800 x 480"};
+    static const char *const labels_en[] = {"Portrait 480 x 800", "Landscape 800 x 480"};
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *b = lv_button_create(modes);
+        lv_obj_remove_style_all(b);
+        lv_obj_set_height(b, 52);
+        lv_obj_set_flex_grow(b, 1);
+        lv_obj_set_style_radius(b, 14, 0);
+        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+        lv_obj_set_style_text_font(b, phone_font_by_size(18), 0);
+        lv_obj_add_event_cb(b, on_mode, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        lv_obj_t *l = lv_label_create(b);
+        lv_label_set_text(l, phone_lang_get() == PHONE_LANG_VI ? labels_vi[i] : labels_en[i]);
+        lv_obj_center(l);
+        s_mode_btn[i] = b;
+    }
+    show_mode();
 
     s_start_btn = lv_button_create(root);
     lv_obj_remove_style_all(s_start_btn);
@@ -572,7 +674,7 @@ extern "C" {
     uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
     {
         (void)instance;
-        return HID_REPORT_DESC;
+        return s_landscape ? HID_REPORT_DESC_LANDSCAPE : HID_REPORT_DESC;
     }
 
     uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t *buffer,
@@ -624,8 +726,8 @@ extern "C" {
                 len -= sizeof(h);
                 s_rx_total = h.payload_total;
                 s_rx_got = 0;
-                const bool ok = h.type == TYPE_JPG && h.x == 0 && h.y == 0 && h.width == SCREEN_W &&
-                                h.height == SCREEN_H && s_rx_total > 0 && s_rx_total <= FRAME_MAX && s_in[s_rx_buf];
+                const bool ok = h.type == TYPE_JPG && h.x == 0 && h.y == 0 && h.width == s_host_w &&
+                                h.height == s_host_h && s_rx_total > 0 && s_rx_total <= FRAME_MAX && s_in[s_rx_buf];
                 if (!ok && h.type == TYPE_JPG) {
                     ESP_LOGW(TAG, "skip picture: x=%u y=%u %ux%u, %u bytes", h.x, h.y, h.width, h.height,
                              static_cast<unsigned>(s_rx_total));
@@ -673,6 +775,7 @@ PhoneSecondScreen::~PhoneSecondScreen()
 
 bool PhoneSecondScreen::run()
 {
+    s_landscape = phone_pref_get("ss_land", 0) != 0;
     build_ui();
     lv_timer_create(on_timer, 10, nullptr);
     return true;
