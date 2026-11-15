@@ -45,6 +45,7 @@ enum Page {
     PAGE_SOUND,
     PAGE_LANG,
     PAGE_TZ,
+    PAGE_POWER,
     PAGE_ABOUT,
     PAGE_COUNT,
 };
@@ -72,6 +73,7 @@ lv_obj_t *s_wifi_list_cap;
 lv_obj_t *s_pass_title;
 lv_obj_t *s_pass_ta;
 lv_obj_t *s_about_vals[5];
+lv_obj_t *s_batt_vals[6];
 lv_obj_t *s_bri_val;
 lv_obj_t *s_vol_val;
 lv_obj_t *s_mute_sw;
@@ -784,9 +786,9 @@ void on_saved_pick(lv_event_t *e)
     connect_saved(static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e))));
 }
 
-void on_restart_pick(lv_event_t *e)
+void on_power_pick(lv_event_t *e)
 {
-    phone_power_confirm(PHONE_POWER_RESTART);
+    phone_power_confirm(static_cast<phone_power_action_t>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e))));
 }
 
 void on_brightness(lv_event_t *e)
@@ -941,6 +943,41 @@ void refresh_about()
     lv_label_set_text(s_about_vals[3], buf);
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     lv_label_set_text(s_about_vals[4], buf);
+
+    bsp_battery_info_t b;
+    if (!phone_power_get_battery(&b)) {
+        for (auto *v : s_batt_vals) {
+            lv_label_set_text(v, "--");
+        }
+        return;
+    }
+    const char *state = T("Không có pin", "No battery");
+    if (b.state == BSP_BATTERY_CHARGING) {
+        state = T("Đang sạc", "Charging");
+    } else if (b.state == BSP_BATTERY_FULL) {
+        state = T("Đã sạc đầy", "Fully charged");
+    } else if (b.state == BSP_BATTERY_DISCHARGING) {
+        state = T("Đang dùng pin", "On battery");
+    }
+    lv_label_set_text(s_batt_vals[0], state);
+    if (b.state == BSP_BATTERY_ABSENT) {
+        lv_label_set_text(s_batt_vals[1], "--");
+    } else {
+        snprintf(buf, sizeof(buf), "%d%%  (%.2f V)", b.percent, b.voltage_mv / 1000.0);
+        lv_label_set_text(s_batt_vals[1], buf);
+    }
+    if (b.vbus_present) {
+        snprintf(buf, sizeof(buf), "%.2f V", b.vbus_mv / 1000.0);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", T("Không cắm", "Not connected"));
+    }
+    lv_label_set_text(s_batt_vals[2], buf);
+    snprintf(buf, sizeof(buf), "%.2f V", b.vsys_mv / 1000.0);
+    lv_label_set_text(s_batt_vals[3], buf);
+    snprintf(buf, sizeof(buf), "%u mA, %.2f V", b.charge_current_ma, b.charge_voltage_mv / 1000.0);
+    lv_label_set_text(s_batt_vals[4], buf);
+    snprintf(buf, sizeof(buf), "%.1f °C", b.die_temp_c);
+    lv_label_set_text(s_batt_vals[5], buf);
 }
 
 void on_timer(lv_timer_t *t)
@@ -1075,10 +1112,7 @@ void build_ui()
     g = make_group(main_page, T("Hệ thống", "System"));
     group_row(g, kIconGlobe, 0x9B51E0, T("Ngôn ngữ", "Language"), phone_lang_get() == PHONE_LANG_VI ? "Tiếng Việt" : "English", PAGE_LANG);
     group_row(g, LV_SYMBOL_GPS, 0x2D9CDB, T("Múi giờ", "Time zone"), nullptr, PAGE_TZ);
-    group_row(g, LV_SYMBOL_POWER, 0xE5484D, T("Khởi động lại", "Restart"), nullptr, PAGE_MAIN);
-    lv_obj_t *restart_row = lv_obj_get_child(g, lv_obj_get_child_count(g) - 1);
-    lv_obj_remove_event_cb(restart_row, on_open_page);
-    lv_obj_add_event_cb(restart_row, on_restart_pick, LV_EVENT_CLICKED, nullptr);
+    group_row(g, LV_SYMBOL_POWER, 0xE5484D, T("Nguồn", "Power"), nullptr, PAGE_POWER);
     group_end(g);
 
     g = make_group(main_page, T("Thông tin", "Info"));
@@ -1221,6 +1255,10 @@ void build_ui()
     }
     tz_update_checks();
 
+    lv_obj_t *power = make_page(root, T("Nguồn", "Power"), PAGE_POWER);
+    make_row(power, T("Tắt nguồn", "Power off"), nullptr, on_power_pick, reinterpret_cast<void *>(PHONE_POWER_OFF));
+    make_row(power, T("Khởi động lại", "Restart"), nullptr, on_power_pick, reinterpret_cast<void *>(PHONE_POWER_RESTART));
+
     lv_obj_t *about = make_page(root, T("Giới thiệu", "About"), PAGE_ABOUT);
     make_text(about, "KSDIY ESP32-P4C5", COLOR_TEXT);
     make_text(about, "ESP32-P4 + ESP32-C5 · 480×800", COLOR_SUB);
@@ -1229,6 +1267,14 @@ void build_ui()
     for (int i = 0; i < 5; i++) {
         s_about_vals[i] = kv_row(dev, keys[i]);
     }
+    group_end(dev);
+    lv_obj_t *batt = make_group(about, T("Pin và nguồn", "Battery and power"));
+    const char *bkeys[6] = {T("Trạng thái", "Status"), T("Mức pin", "Level"), "USB", T("Điện áp hệ thống", "System voltage"),
+                            T("Bộ sạc", "Charger"), T("Nhiệt độ PMIC", "PMIC temperature")};
+    for (int i = 0; i < 6; i++) {
+        s_batt_vals[i] = kv_row(batt, bkeys[i]);
+    }
+    group_end(batt);
     refresh_about();
 
     show_page(PAGE_MAIN);

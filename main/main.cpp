@@ -11,6 +11,7 @@
 #include "phone_locale.h"
 #include "phone_fonts.h"
 #include "phone_audio.h"
+#include "phone_power.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
@@ -101,6 +102,8 @@ extern "C" void app_main(void)
 
         /* Wi-Fi service: brings the ESP32-C5 up in the background and reconnects to saved networks */
         phone_net_start();
+        /* Battery polling and power key (AXP2101) */
+        phone_power_start();
 
         /* Create a timer to update the clock and the Wi-Fi icon */
         lv_timer_create([](lv_timer_t *t) {
@@ -128,6 +131,29 @@ extern "C" void app_main(void)
             if (wifi != s_wifi) {
                 s_wifi = wifi;
                 phone->getDisplay().getStatusBar()->setWifiIconState(wifi);
+            }
+
+            static int s_bat = -2;
+            static bool s_chg;
+            bsp_battery_info_t b;
+            if (phone_power_get_battery(&b)) {
+                auto *bar = phone->getDisplay().getStatusBar();
+                int pct = b.state == BSP_BATTERY_ABSENT ? -1 : b.percent;
+                bool chg = b.state == BSP_BATTERY_CHARGING;
+                if (pct != s_bat || chg != s_chg) {
+                    if (pct < 0) {
+                        bar->hideBatteryIcon();
+                        bar->hideBatteryPercent();
+                    } else {
+                        if (s_bat < 0) {
+                            bar->showBatteryIcon();
+                            bar->showBatteryPercent();
+                        }
+                        bar->setBatteryPercent(chg, pct);
+                    }
+                    s_bat = pct;
+                    s_chg = chg;
+                }
             }
         }, 1000, phone);
     }

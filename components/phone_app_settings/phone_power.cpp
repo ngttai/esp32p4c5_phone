@@ -12,14 +12,24 @@
 
 namespace {
 
+constexpr int BATTERY_POLL_MS = 5000;
+
 constexpr uint32_t COLOR_DIM = 0x000000;
 constexpr uint32_t COLOR_CARD = 0x1C252E;
 constexpr uint32_t COLOR_TEXT = 0xFFFFFF;
+constexpr uint32_t COLOR_OFF = 0xE5484D;
 constexpr uint32_t COLOR_RESTART = 0x2F80ED;
 constexpr uint32_t COLOR_CANCEL = 0x3A4652;
 
 lv_obj_t *s_menu;
 lv_obj_t *s_card;
+
+portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
+bsp_battery_info_t s_battery;      // guarded by s_lock
+bool s_battery_valid;              // guarded by s_lock
+TaskHandle_t s_poll_task;
+bool s_screen_off;
+int s_saved_bl = 100;
 
 void close_menu()
 {
@@ -58,6 +68,20 @@ void do_restart(lv_timer_t *)
     bsp_display_brightness_set(0);
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
+}
+
+void do_off(lv_timer_t *)
+{
+    bsp_power_off();
+    ESP_LOGE(TAG, "Power off failed");
+    close_menu();
+}
+
+void on_off(lv_event_t *)
+{
+    ESP_LOGW(TAG, "Power off");
+    show_busy(phone_tr("Đang tắt nguồn…", "Powering off…"));
+    run_later(do_off, 400);
 }
 
 void on_restart(lv_event_t *)
@@ -119,20 +143,104 @@ void show_menu(phone_power_action_t action)
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(card);
-    const char *title_text = action == PHONE_POWER_RESTART_LANG
-                             ? phone_tr("Khởi động lại để áp dụng ngôn ngữ?", "Restart to apply language?")
-                             : phone_tr("Khởi động lại?", "Restart?");
+    const char *title_text = phone_tr("Nguồn", "Power");
+    if (action == PHONE_POWER_OFF) {
+        title_text = phone_tr("Tắt nguồn?", "Power off?");
+    } else if (action == PHONE_POWER_RESTART) {
+        title_text = phone_tr("Khởi động lại?", "Restart?");
+    } else if (action == PHONE_POWER_RESTART_LANG) {
+        title_text = phone_tr("Khởi động lại để áp dụng ngôn ngữ?", "Restart to apply language?");
+    }
     lv_label_set_text(title, title_text);
     lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(title, LV_PCT(100));
     lv_obj_set_style_text_font(title, phone_font_by_size(28), 0);
     lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT), 0);
 
-    add_button(card, phone_tr("Khởi động lại", "Restart"), COLOR_RESTART, on_restart);
+    if (action == PHONE_POWER_MENU || action == PHONE_POWER_OFF) {
+        add_button(card, phone_tr("Tắt nguồn", "Power off"), COLOR_OFF, on_off);
+    }
+    if (action != PHONE_POWER_OFF) {
+        add_button(card, phone_tr("Khởi động lại", "Restart"), COLOR_RESTART, on_restart);
+    }
     add_button(card, action == PHONE_POWER_RESTART_LANG ? phone_tr("Để sau", "Later") : phone_tr("Hủy", "Cancel"), COLOR_CANCEL, on_cancel);
 }
 
+void screen_set(bool on)
+{
+    if (on) {
+        bsp_display_brightness_set(s_saved_bl > 0 ? s_saved_bl : 100);
+    } else {
+        int cur = phone_pref_get("bri", 100);
+        s_saved_bl = cur > 0 ? cur : 100;
+        bsp_display_brightness_set(0);
+    }
+    s_screen_off = !on;
+}
+
+void poll_task(void *)
+{
+    for (;;) {
+        bsp_battery_info_t info;
+        if (bsp_battery_get_info(&info) == ESP_OK) {
+            portENTER_CRITICAL(&s_lock);
+            s_battery = info;
+            s_battery_valid = true;
+            portEXIT_CRITICAL(&s_lock);
+        }
+        /* Woken early by USB and charger events */
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BATTERY_POLL_MS));
+    }
+}
+
+/* Called from the BSP PMIC task */
+void on_pmic_event(bsp_pmic_event_t event, void *)
+{
+    switch (event) {
+    case BSP_PMIC_EVENT_KEY_SHORT_PRESS:
+        screen_set(s_screen_off);
+        break;
+    case BSP_PMIC_EVENT_KEY_LONG_PRESS:
+        if (s_screen_off) {
+            screen_set(true);
+        }
+        if (bsp_display_lock(1000)) {
+            show_menu(PHONE_POWER_MENU);
+            bsp_display_unlock();
+        }
+        break;
+    default:
+        xTaskNotifyGive(s_poll_task);
+        break;
+    }
+}
+
 } // namespace
+
+extern "C" void phone_power_start(void)
+{
+    if (s_poll_task) {
+        return;
+    }
+    if (xTaskCreate(poll_task, "battery", 3072, nullptr, 3, &s_poll_task) != pdPASS) {
+        ESP_LOGE(TAG, "Battery task create failed");
+        return;
+    }
+    if (bsp_pmic_event_register(on_pmic_event, nullptr) != ESP_OK) {
+        ESP_LOGW(TAG, "PMIC events unavailable (power key, USB)");
+    }
+}
+
+extern "C" bool phone_power_get_battery(bsp_battery_info_t *out)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool valid = s_battery_valid;
+    if (valid) {
+        *out = s_battery;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return valid;
+}
 
 extern "C" void phone_power_confirm(phone_power_action_t action)
 {
