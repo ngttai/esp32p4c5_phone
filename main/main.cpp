@@ -12,6 +12,7 @@
 #include "phone_fonts.h"
 #include "phone_audio.h"
 #include "phone_power.h"
+#include "phone_storage.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
@@ -104,6 +105,8 @@ extern "C" void app_main(void)
         phone_net_start();
         /* Battery polling and power key (AXP2101) */
         phone_power_start();
+        /* microSD card in the background (never formatted) */
+        phone_storage_start();
 
         /* Create a timer to update the clock and the Wi-Fi icon */
         lv_timer_create([](lv_timer_t *t) {

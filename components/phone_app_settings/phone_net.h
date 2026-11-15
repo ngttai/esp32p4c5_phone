@@ -20,6 +20,8 @@ typedef struct {
 void phone_net_start(void);
 void phone_net_get_status(phone_net_status_t *out);
 bool phone_net_ready(void);
+/** ESP32-C5 (Wi-Fi co-processor) firmware version, read once Wi-Fi is up; false until then. */
+bool phone_net_c5_version(char *out, size_t len);
 /** User-initiated connect: saves the network at the front of the list and connects; auto reconnect pauses until it succeeds. */
 void phone_net_connect(const char *ssid, const char *pass);
 /** User turns Wi-Fi off: drop the link and stop auto reconnect. */

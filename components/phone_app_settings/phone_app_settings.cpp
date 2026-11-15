@@ -10,6 +10,8 @@
 #include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_chip_info.h"
+#include "esp_app_desc.h"
+#include "esp_hosted_host_fw_ver.h"
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "bsp/esp-bsp.h"
@@ -25,6 +27,7 @@
 #include "phone_power.h"
 #include "phone_locale.h"
 #include "phone_audio.h"
+#include "phone_storage.h"
 #include "phone_app_settings.hpp"
 
 #define APP_NAME "Cài đặt"
@@ -72,7 +75,9 @@ lv_obj_t *s_wifi_body;
 lv_obj_t *s_wifi_list_cap;
 lv_obj_t *s_pass_title;
 lv_obj_t *s_pass_ta;
-lv_obj_t *s_about_vals[5];
+lv_obj_t *s_about_vals[4];
+lv_obj_t *s_c5_ver_val;
+lv_obj_t *s_sd_val;
 lv_obj_t *s_batt_vals[6];
 lv_obj_t *s_bri_val;
 lv_obj_t *s_vol_val;
@@ -927,6 +932,30 @@ void refresh_wifi_status()
     lv_label_set_text(s_wifi_status, buf);
 }
 
+/* One I2C address probe on the BSP bus; the bus is shared with touch, the driver serializes it. */
+bool i2c_present(uint16_t addr)
+{
+    i2c_master_bus_handle_t bus = bsp_i2c_get_handle();
+    return bus && i2c_master_probe(bus, addr, 50) == ESP_OK;
+}
+
+void hw_row(lv_obj_t *card, const char *name, const char *chip, uint16_t addr)
+{
+    lv_obj_t *v = kv_row(card, name);
+    char buf[48];
+    if (addr) {
+        snprintf(buf, sizeof(buf), "%s  %s", chip, i2c_present(addr) ? LV_SYMBOL_OK : T("không thấy", "not found"));
+    } else {
+        snprintf(buf, sizeof(buf), "%s", chip);
+    }
+    lv_label_set_text(v, buf);
+}
+
+void sw_row(lv_obj_t *card, const char *name, const char *value)
+{
+    lv_label_set_text(kv_row(card, name), value);
+}
+
 void refresh_about()
 {
     esp_chip_info_t chip;
@@ -936,13 +965,33 @@ void refresh_about()
     char buf[32];
     snprintf(buf, sizeof(buf), "P4 rev v%d.%d", chip.revision / 100, chip.revision % 100);
     lv_label_set_text(s_about_vals[0], buf);
-    lv_label_set_text(s_about_vals[1], esp_get_idf_version());
     snprintf(buf, sizeof(buf), "%u KB", static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
-    lv_label_set_text(s_about_vals[2], buf);
+    lv_label_set_text(s_about_vals[1], buf);
     snprintf(buf, sizeof(buf), "%u KB", static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
-    lv_label_set_text(s_about_vals[3], buf);
+    lv_label_set_text(s_about_vals[2], buf);
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    lv_label_set_text(s_about_vals[4], buf);
+    lv_label_set_text(s_about_vals[3], buf);
+    if (!phone_net_c5_version(buf, sizeof(buf))) {
+        strlcpy(buf, "--", sizeof(buf));
+    }
+    lv_label_set_text(s_c5_ver_val, buf);
+
+    uint64_t sd_total = 0, sd_free = 0;
+    switch (phone_storage_get(&sd_total, &sd_free)) {
+    case PHONE_STORAGE_MOUNTED:
+        snprintf(buf, sizeof(buf), "%.1f / %.1f GB", (sd_total - sd_free) / 1e9, sd_total / 1e9);
+        break;
+    case PHONE_STORAGE_CHECKING:
+        snprintf(buf, sizeof(buf), "%s", T("Đang kiểm tra…", "Checking…"));
+        break;
+    case PHONE_STORAGE_NO_CARD:
+        snprintf(buf, sizeof(buf), "%s", T("Không có thẻ", "No card"));
+        break;
+    default:
+        snprintf(buf, sizeof(buf), "%s", T("Tắt", "Disabled"));
+        break;
+    }
+    lv_label_set_text(s_sd_val, buf);
 
     bsp_battery_info_t b;
     if (!phone_power_get_battery(&b)) {
@@ -1263,11 +1312,39 @@ void build_ui()
     make_text(about, "KSDIY ESP32-P4C5", COLOR_TEXT);
     make_text(about, "ESP32-P4 + ESP32-C5 · 480×800", COLOR_SUB);
     lv_obj_t *dev = make_group(about, T("Thiết bị", "Device"));
-    const char *keys[5] = {"Chip", "ESP-IDF", T("RAM trống", "Free RAM"), T("PSRAM trống", "Free PSRAM"), "MAC"};
-    for (int i = 0; i < 5; i++) {
+    const char *keys[4] = {"Chip", T("RAM trống", "Free RAM"), T("PSRAM trống", "Free PSRAM"), "MAC"};
+    for (int i = 0; i < 4; i++) {
         s_about_vals[i] = kv_row(dev, keys[i]);
     }
     group_end(dev);
+
+    lv_obj_t *sw = make_group(about, T("Phần mềm", "Software"));
+    const esp_app_desc_t *app = esp_app_get_description();
+    char ver[40];
+    sw_row(sw, T("Phiên bản", "Version"), app->version);
+    snprintf(ver, sizeof(ver), "%s %.5s", app->date, app->time);
+    sw_row(sw, T("Ngày build", "Built"), ver);
+    sw_row(sw, "ESP-IDF", esp_get_idf_version());
+    s_c5_ver_val = kv_row(sw, T("Firmware Wi-Fi (C5)", "Wi-Fi firmware (C5)"));
+    snprintf(ver, sizeof(ver), "%d.%d.%d", ESP_HOSTED_VERSION_MAJOR_1, ESP_HOSTED_VERSION_MINOR_1, ESP_HOSTED_VERSION_PATCH_1);
+    sw_row(sw, "ESP-Hosted", ver);
+    snprintf(ver, sizeof(ver), "%d.%d.%d", LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH);
+    sw_row(sw, "LVGL", ver);
+    snprintf(ver, sizeof(ver), "%d.%d.%d", BROOKESIA_CORE_VER_MAJOR, BROOKESIA_CORE_VER_MINOR, BROOKESIA_CORE_VER_PATCH);
+    sw_row(sw, "Brookesia", ver);
+    group_end(sw);
+
+    /* Checked once when the app opens: an I2C address probe per chip */
+    lv_obj_t *hw = make_group(about, T("Phần cứng", "Hardware"));
+    hw_row(hw, T("Màn hình", "Display"), "ST7102 480×800", 0);
+    hw_row(hw, T("Cảm ứng", "Touch"), "ST7123", 0x55);
+    hw_row(hw, "PMIC", "AXP2101", 0x34);
+    hw_row(hw, T("Loa (codec)", "Speaker codec"), "ES8311", 0x18);
+    hw_row(hw, T("Mic (codec)", "Mic codec"), "ES7210", 0x40);
+    hw_row(hw, "IMU", "LSM6DS3TR-C", 0x6A);
+    hw_row(hw, "Camera", "SC2336 (CSI)", 0);
+    s_sd_val = kv_row(hw, T("Thẻ nhớ", "microSD"));
+    group_end(hw);
     lv_obj_t *batt = make_group(about, T("Pin và nguồn", "Battery and power"));
     const char *bkeys[6] = {T("Trạng thái", "Status"), T("Mức pin", "Level"), "USB", T("Điện áp hệ thống", "System voltage"),
                             T("Bộ sạc", "Charger"), T("Nhiệt độ PMIC", "PMIC temperature")};

@@ -16,6 +16,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "bsp/esp-bsp.h"
+#include "esp_hosted.h"
 
 #define TAG "STAT"
 
@@ -44,6 +45,8 @@ phone_net_status_t s_st;
 SavedList s_list;                 // guarded by s_mtx
 int s_try = 0;                    // index in s_list of the current attempt; guarded by s_mtx
 std::atomic<bool> s_ready{false};
+char s_c5_ver[16];                // written once before s_c5_ver_ok is set
+std::atomic<bool> s_c5_ver_ok{false};
 std::atomic<bool> s_auto{false};
 char s_pend_ssid[33] = {};       // user-entered credentials, saved only after GOT_IP
 char s_pend_pass[65] = {};
@@ -258,6 +261,11 @@ bool wifi_start()
     }
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, nullptr);
+    esp_hosted_coprocessor_fwver_t ver = {};
+    if (esp_hosted_get_coprocessor_fwversion(&ver) == ESP_OK) {
+        snprintf(s_c5_ver, sizeof(s_c5_ver), "%u.%u.%u", (unsigned)ver.major1, (unsigned)ver.minor1, (unsigned)ver.patch1);
+        s_c5_ver_ok = true;
+    }
     s_ready = true;
     ESP_LOGI(TAG, "Wifi started");
     /* STA_START fired inside bsp_wifi_init(), before the handlers above existed */
@@ -322,6 +330,15 @@ extern "C" void phone_net_get_status(phone_net_status_t *out)
 extern "C" bool phone_net_ready(void)
 {
     return s_ready;
+}
+
+extern "C" bool phone_net_c5_version(char *out, size_t len)
+{
+    if (!s_c5_ver_ok) {
+        return false;
+    }
+    strlcpy(out, s_c5_ver, len);
+    return true;
 }
 
 extern "C" void phone_net_disconnect(void)
