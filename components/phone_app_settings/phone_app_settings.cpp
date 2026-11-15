@@ -28,6 +28,7 @@
 #include "phone_locale.h"
 #include "phone_audio.h"
 #include "phone_storage.h"
+#include "phone_lock.h"
 #include "phone_app_settings.hpp"
 
 #define APP_NAME "Cài đặt"
@@ -78,6 +79,7 @@ lv_obj_t *s_pass_ta;
 lv_obj_t *s_about_vals[4];
 lv_obj_t *s_c5_ver_val;
 lv_obj_t *s_sd_val;
+lv_obj_t *s_to_check[8];
 lv_obj_t *s_batt_vals[6];
 lv_obj_t *s_bri_val;
 lv_obj_t *s_vol_val;
@@ -796,6 +798,20 @@ void on_power_pick(lv_event_t *e)
     phone_power_confirm(static_cast<phone_power_action_t>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e))));
 }
 
+void to_update_checks()
+{
+    int cur = phone_lock_timeout_get();
+    for (int i = 0; i < phone_lock_timeout_count(); i++) {
+        lv_label_set_text(s_to_check[i], i == cur ? LV_SYMBOL_OK : "");
+    }
+}
+
+void on_timeout_pick(lv_event_t *e)
+{
+    phone_lock_timeout_set(static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e))));
+    to_update_checks();
+}
+
 void on_brightness(lv_event_t *e)
 {
     int v = lv_slider_get_value(lv_event_get_target_obj(e));
@@ -1280,6 +1296,15 @@ void build_ui()
 
     build_slider_card(root, T("Màn hình", "Display"), T("Độ sáng", "Brightness"), PAGE_DISPLAY, 5,
                       phone_pref_get("bri", 100), on_brightness, on_brightness_done, &s_bri_val);
+    lv_obj_t *to = make_group(s_pages[PAGE_DISPLAY], T("Tự tắt màn hình", "Screen timeout"));
+    for (int i = 0; i < phone_lock_timeout_count(); i++) {
+        lv_obj_t *row = grouped_row(to, phone_lock_timeout_label(i), on_timeout_pick, reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        s_to_check[i] = lv_label_create(row);
+        lv_obj_set_style_text_color(s_to_check[i], lv_color_hex(COLOR_ACCENT), 0);
+    }
+    group_end(to);
+    to_update_checks();
+
     s_muted = phone_pref_get("mute", 0) != 0;
     build_slider_card(root, T("Âm thanh", "Sound"), T("Âm lượng", "Volume"), PAGE_SOUND, 0,
                       phone_pref_get("vol", 60), on_volume, on_volume_done, &s_vol_val);

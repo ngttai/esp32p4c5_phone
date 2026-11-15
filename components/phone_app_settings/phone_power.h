@@ -16,7 +16,7 @@ typedef enum {
 
 /**
  * Start the PMIC service: battery polling (every 5 s and on USB/charger events) and the power key
- * (short press toggles the screen, long press opens the power menu).
+ * (short press: lock screen then screen off, long press: power menu).
  */
 void phone_power_start(void);
 /** Latest battery reading; false until the first one succeeded. */

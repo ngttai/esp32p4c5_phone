@@ -7,6 +7,7 @@
 #include "bsp/esp-bsp.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
+#include "phone_lock.h"
 
 #define TAG "PWR"
 
@@ -28,8 +29,6 @@ portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 bsp_battery_info_t s_battery;      // guarded by s_lock
 bool s_battery_valid;              // guarded by s_lock
 TaskHandle_t s_poll_task;
-bool s_screen_off;
-int s_saved_bl = 100;
 
 void close_menu()
 {
@@ -120,7 +119,8 @@ void show_menu(phone_power_action_t action)
     if (s_menu) {
         return;
     }
-    s_menu = lv_obj_create(lv_layer_top());
+    /* System layer: also above the lock screen */
+    s_menu = lv_obj_create(lv_layer_sys());
     lv_obj_remove_style_all(s_menu);
     lv_obj_set_size(s_menu, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_opa(s_menu, LV_OPA_70, 0);
@@ -166,18 +166,6 @@ void show_menu(phone_power_action_t action)
     add_button(card, action == PHONE_POWER_RESTART_LANG ? phone_tr("Để sau", "Later") : phone_tr("Hủy", "Cancel"), COLOR_CANCEL, on_cancel);
 }
 
-void screen_set(bool on)
-{
-    if (on) {
-        bsp_display_brightness_set(s_saved_bl > 0 ? s_saved_bl : 100);
-    } else {
-        int cur = phone_pref_get("bri", 100);
-        s_saved_bl = cur > 0 ? cur : 100;
-        bsp_display_brightness_set(0);
-    }
-    s_screen_off = !on;
-}
-
 void poll_task(void *)
 {
     for (;;) {
@@ -198,16 +186,19 @@ void on_pmic_event(bsp_pmic_event_t event, void *)
 {
     switch (event) {
     case BSP_PMIC_EVENT_KEY_SHORT_PRESS:
-        screen_set(s_screen_off);
+        /* lock screen, then screen off */
+        phone_lock_on_power_key();
         break;
     case BSP_PMIC_EVENT_KEY_LONG_PRESS:
-        if (s_screen_off) {
-            screen_set(true);
-        }
+        phone_lock_wake();
         if (bsp_display_lock(1000)) {
             show_menu(PHONE_POWER_MENU);
             bsp_display_unlock();
         }
+        break;
+    case BSP_PMIC_EVENT_VBUS_INSERTED:
+        xTaskNotifyGive(s_poll_task);
+        phone_lock_on_charger();
         break;
     default:
         xTaskNotifyGive(s_poll_task);
