@@ -13,3 +13,11 @@ dependencies:
   brookesia_app_squareline_demo:
     version: "*"
     override_path: "../components/brookesia_app_squareline_demo"
+
+  brookesia_app_calculator:
+    version: "*"
+    override_path: "../components/brookesia_app_calculator"
+
+  brookesia_app_game_2048:
+    version: "*"
+    override_path: "../components/brookesia_app_game_2048"
