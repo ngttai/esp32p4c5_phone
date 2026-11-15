@@ -1,0 +1,3 @@
+dependencies:
+  # USB host UVC class driver (webcams)
+  espressif/usb_host_uvc: "^2.6.0"
