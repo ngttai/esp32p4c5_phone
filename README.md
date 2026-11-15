@@ -4,7 +4,7 @@
 
 Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 panel, ST7102 over MIPI DSI, ST7123 touch), with a settings app and the system behavior of a small phone:
 
-- **Launcher** with the Settings, Level, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
+- **Launcher** with the Settings, Level, Camera, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
 - **Settings app** (Vietnamese / English):
   - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect, forget.
   - Display: brightness, screen timeout.
@@ -13,6 +13,7 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
   - Power: power off and restart.
   - About: device, software versions (app, ESP-IDF, ESP32-C5 firmware, ESP-Hosted, LVGL, Brookesia), detected hardware, microSD size, battery and charger.
 - **Level app**: two-axis spirit level on the IMU accelerometer. The bubble floats toward the higher side and turns green within 0.5° on both axes; Calibrate stores the current position as zero.
+- **Camera app**: live preview of the CSI sensor (cropped, scaled and rotated by the PPA) and photos saved as JPEG (hardware encoder) in `/sdcard/DCIM`. The sensor is powered down when the app is in the background.
 - **Lock screen**: flip clock, date, Wi-Fi and battery, slide to unlock, charging effect. The wallpaper is the launcher one, blurred at boot.
 - **Screen power**: the screen dims after the timeout, then goes off with the lock screen up. While it is off, LVGL is paused and Wi-Fi uses modem sleep.
 - **Keys**:
@@ -36,6 +37,7 @@ Settings are stored in NVS (namespace `phone`).
 * KSDIY ESP32-P4C5 4.3" board (ESP32-P4 rev v3.2, 16 MB flash, 32 MB PSRAM).
 * On-board ESP32-C5 with the ESP-Hosted co-processor firmware 2.12.13 (as shipped) for Wi-Fi.
 * On-board LSM6DS3TR-C IMU for the Level app.
+* Optional: SC2336 or OV2710 camera module on the CSI connector (Camera app).
 * Optional: battery on J2 (battery level, running without USB), microSD card, speaker.
 
 ## Software Requirements
@@ -57,6 +59,7 @@ Settings are stored in NVS (namespace `phone`).
   - `fonts/`: UI fonts with Vietnamese glyphs (Be Vietnam Pro, 12 to 28 px, SIL Open Font License, see `fonts/OFL.txt`) and the 120 px clock digits.
   - `tools/gen_lv_font.py`: script that generated the UI fonts from the TTF (Python with Pillow).
 - `components/phone_app_level/`: the Level app.
+- `components/phone_app_camera/`: the Camera app.
 - `components/brookesia_app_calculator/`, `components/brookesia_app_game_2048/`: Calculator and 2048 from ESP-Brookesia, ported from its speaker system to the phone system. 2048 ignores swipes that start on a screen edge or on the lock screen.
 - `components/brookesia_core/`: ESP-Brookesia core (phone system, GUI, stylesheets).
 - `components/brookesia_app_squareline_demo/`: Squareline demo app.
@@ -66,6 +69,7 @@ Settings are stored in NVS (namespace `phone`).
 ## Configuration
 
 - `Phone example → Mount the microSD card at boot` (`CONFIG_PHONE_SD_CARD_MOUNT`, default on).
+- The camera sensors SC2336 and OV2710 and the ISP pipeline controller of `esp_video` (auto exposure, white balance, color correction) are enabled in `sdkconfig.defaults`.
 - Wi-Fi goes through ESP-Hosted over SDIO; `sdkconfig.defaults` selects the ESP32-C5 as the co-processor.
 
 ## Build and Flash
@@ -85,6 +89,7 @@ To exit the serial monitor, type `Ctrl-]`.
 - The phone takes the default display and touch from LVGL (the BSP registers them), so no extra wiring is needed.
 - The stock Brookesia fonts have no Vietnamese glyphs, so `main.cpp` replaces the 12 to 28 px system fonts in the stylesheet with the fonts of the Settings app (Be Vietnam Pro).
 - The lock screen and the power menu are drawn on the LVGL system layer, above the Brookesia status and navigation bars.
+- The Camera app task runs on core 0: the CSI and DSI controllers share one interrupt, which can only be attached on the core that started the display.
 - The slot has no card-detect pin: a card inserted after boot needs a restart.
 - The AXP2101 has no battery current measurement, so the About page shows voltage and fuel gauge level only.
 - BOOT (GPIO35) is also wired to the DTR line of the CH343P USB-UART bridge: a terminal on that port that asserts DTR reads as "volume down" held.

@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "main.cpp"
     INCLUDE_DIRS "."
-    REQUIRES phone_common_net phone_app_settings phone_app_level nvs_flash)
+    REQUIRES phone_common_net phone_app_settings phone_app_level phone_app_camera nvs_flash)
 
 target_compile_options(${COMPONENT_LIB} PUBLIC -Wno-missing-field-initializers)
 
