@@ -4,7 +4,7 @@
 
 Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 panel, ST7102 over MIPI DSI, ST7123 touch), with a settings app and the system behavior of a small phone:
 
-- **Launcher** with the Settings app and the Squareline demo app. The status bar shows the clock, Wi-Fi level and battery.
+- **Launcher** with the Settings app, the Level app and the Squareline demo app. The status bar shows the clock, Wi-Fi level and battery.
 - **Settings app** (Vietnamese / English):
   - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect, forget.
   - Display: brightness, screen timeout.
@@ -12,6 +12,7 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
   - Language, time zone (SNTP once Wi-Fi is up).
   - Power: power off and restart.
   - About: device, software versions (app, ESP-IDF, ESP32-C5 firmware, ESP-Hosted, LVGL, Brookesia), detected hardware, microSD size, battery and charger.
+- **Level app**: two-axis spirit level on the IMU accelerometer. The bubble floats toward the higher side and turns green within 0.5° on both axes; Calibrate stores the current position as zero.
 - **Lock screen**: flip clock, date, Wi-Fi and battery, slide to unlock, charging effect. The wallpaper is the launcher one, blurred at boot.
 - **Screen power**: the screen dims after the timeout, then goes off with the lock screen up. While it is off, LVGL is paused and Wi-Fi uses modem sleep.
 - **Keys**:
@@ -34,6 +35,7 @@ Settings are stored in NVS (namespace `phone`).
 
 * KSDIY ESP32-P4C5 4.3" board (ESP32-P4 rev v3.2, 16 MB flash, 32 MB PSRAM).
 * On-board ESP32-C5 with the ESP-Hosted co-processor firmware 2.12.13 (as shipped) for Wi-Fi.
+* On-board LSM6DS3TR-C IMU for the Level app.
 * Optional: battery on J2 (battery level, running without USB), microSD card, speaker.
 
 ## Software Requirements
@@ -54,6 +56,7 @@ Settings are stored in NVS (namespace `phone`).
   - `phone_locale.cpp`: language, time zone and small NVS preferences.
   - `fonts/`: UI fonts with Vietnamese glyphs (Be Vietnam Pro, 12 to 28 px, SIL Open Font License, see `fonts/OFL.txt`) and the 120 px clock digits.
   - `tools/gen_lv_font.py`: script that generated the UI fonts from the TTF (Python with Pillow).
+- `components/phone_app_level/`: the Level app.
 - `components/brookesia_core/`: ESP-Brookesia core (phone system, GUI, stylesheets).
 - `components/brookesia_app_squareline_demo/`: Squareline demo app.
 - `components/phone_common_net/`: boot-time Wi-Fi for the RainMaker workflow; a no-op here (`CONFIG_RAINMAKER_APP_SUPPORT=n`).
