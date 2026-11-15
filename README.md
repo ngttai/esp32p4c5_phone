@@ -52,7 +52,8 @@ Settings are stored in NVS (namespace `phone`).
   - `phone_audio.cpp`: speaker volume and the confirmation beep.
   - `phone_storage.cpp`: microSD mount.
   - `phone_locale.cpp`: language, time zone and small NVS preferences.
-  - `fonts/`: UI fonts with Vietnamese glyphs (12 to 28 px) and the 120 px clock digits.
+  - `fonts/`: UI fonts with Vietnamese glyphs (Be Vietnam Pro, 12 to 28 px, SIL Open Font License, see `fonts/OFL.txt`) and the 120 px clock digits.
+  - `tools/gen_lv_font.py`: script that generated the UI fonts from the TTF (Python with Pillow).
 - `components/brookesia_core/`: ESP-Brookesia core (phone system, GUI, stylesheets).
 - `components/brookesia_app_squareline_demo/`: Squareline demo app.
 - `components/phone_common_net/`: boot-time Wi-Fi for the RainMaker workflow; a no-op here (`CONFIG_RAINMAKER_APP_SUPPORT=n`).
@@ -78,7 +79,7 @@ To exit the serial monitor, type `Ctrl-]`.
 
 - LVGL is pinned to `^9` (9.5 in the current lock) by `brookesia_core`. A few `lv_part_t` conversions were changed to `LV_PART_MAIN` to build against it.
 - The phone takes the default display and touch from LVGL (the BSP registers them), so no extra wiring is needed.
-- The stock Brookesia fonts have no Vietnamese glyphs, so `main.cpp` replaces the 12 to 28 px system fonts in the stylesheet with the fonts of the Settings app (same typeface).
+- The stock Brookesia fonts have no Vietnamese glyphs, so `main.cpp` replaces the 12 to 28 px system fonts in the stylesheet with the fonts of the Settings app (Be Vietnam Pro).
 - The lock screen and the power menu are drawn on the LVGL system layer, above the Brookesia status and navigation bars.
 - The slot has no card-detect pin: a card inserted after boot needs a restart.
 - The AXP2101 has no battery current measurement, so the About page shows voltage and fuel gauge level only.
