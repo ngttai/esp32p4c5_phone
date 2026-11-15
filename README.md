@@ -4,7 +4,7 @@
 
 Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 panel, ST7102 over MIPI DSI, ST7123 touch), with a settings app and the system behavior of a small phone:
 
-- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Files, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
+- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Video, Files, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
 - **Settings app** (Vietnamese / English):
   - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect, forget.
   - Display: brightness, screen timeout.
@@ -17,6 +17,11 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
 - **Gallery app**: the photos of `/sdcard/DCIM` as a grid of thumbnails, newest first, with a viewer (previous / next by buttons or swipe) and delete. Photos are decoded by the hardware JPEG decoder and scaled by the PPA.
 - **Weather app**: current conditions and a 7-day forecast from [open-meteo.com](https://open-meteo.com) (HTTPS, no key) for a city picked from a list. Needs Wi-Fi with Internet access.
 - **Music app**: plays the MP3, WAV, FLAC, AAC, M4A and OGG files of the card (up to three folder levels deep) on the speaker (mono), with play / pause, previous, next, repeat (off, list, one track) and auto-advance. MP3 files show the title, artist and duration of their ID3 tag, read in the background, and the JPEG cover of the tag (baseline JPEG only; a colored placeholder otherwise). It keeps playing in the background and with the screen off, and follows the phone volume.
+- **Video app**: plays Motion JPEG `.avi` files with 16-bit PCM sound from the card (hardware JPEG decoder, PPA scaling). Landscape videos are turned to fill the portrait screen. The ESP32-P4 has no H.264 decoder, so other videos must be converted first:
+
+  ```
+  ffmpeg -i in.mp4 -vf scale=800:480 -r 20 -c:v mjpeg -q:v 5 -pix_fmt yuvj420p -c:a pcm_s16le -ar 22050 -ac 1 out.avi
+  ```
 - **Files app**: browse the microSD card, see the details of a file, delete files and empty folders.
 - **Lock screen**: flip clock, date, Wi-Fi and battery, slide to unlock, charging effect. The wallpaper is the launcher one, blurred at boot.
 - **Screen power**: the screen dims after the timeout, then goes off with the lock screen up. While it is off, LVGL is paused and Wi-Fi uses modem sleep.
@@ -67,6 +72,7 @@ Settings are stored in NVS (namespace `phone`).
 - `components/phone_app_gallery/`: the Gallery app.
 - `components/phone_app_weather/`: the Weather app.
 - `components/phone_app_music/`: the Music app (decoders from `espressif/esp_audio_codec`, fetched by the component manager). `music/` holds the ID3 parser, track library and background metadata service, adapted from the author's esp_chatbot_v1 project.
+- `components/phone_app_video/`: the Video app.
 - `components/phone_app_files/`: the Files app.
 - `components/brookesia_app_calculator/`, `components/brookesia_app_game_2048/`: Calculator and 2048 from ESP-Brookesia, ported from its speaker system to the phone system. 2048 ignores swipes that start on a screen edge or on the lock screen.
 - `components/brookesia_core/`: ESP-Brookesia core (phone system, GUI, stylesheets).
