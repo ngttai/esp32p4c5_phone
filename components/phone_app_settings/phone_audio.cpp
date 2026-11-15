@@ -18,7 +18,7 @@ constexpr int SAMPLES = RATE * TONE_MS / 1000;
 
 std::atomic<int> s_volume{60};
 std::atomic<bool> s_busy{false};
-esp_codec_dev_handle_t s_spk;   // only touched by the beep task, one at a time (s_busy)
+esp_codec_dev_handle_t s_spk;   // only touched by whoever holds s_busy: the beep task or the music player
 
 void beep_task(void *)
 {
@@ -58,6 +58,25 @@ extern "C" void phone_audio_set_volume(int percent)
 extern "C" int phone_audio_get_volume(void)
 {
     return s_volume;
+}
+
+extern "C" void *phone_audio_speaker_take(void)
+{
+    if (s_busy.exchange(true)) {
+        return nullptr;
+    }
+    if (!s_spk) {
+        s_spk = bsp_audio_codec_speaker_init();
+    }
+    if (!s_spk) {
+        s_busy = false;
+    }
+    return s_spk;
+}
+
+extern "C" void phone_audio_speaker_give(void)
+{
+    s_busy = false;
 }
 
 extern "C" void phone_audio_beep(void)

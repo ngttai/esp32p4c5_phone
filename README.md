@@ -4,7 +4,7 @@
 
 Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 panel, ST7102 over MIPI DSI, ST7123 touch), with a settings app and the system behavior of a small phone:
 
-- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
+- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Files, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
 - **Settings app** (Vietnamese / English):
   - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect, forget.
   - Display: brightness, screen timeout.
@@ -16,6 +16,8 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
 - **Camera app**: live preview of the CSI sensor (cropped, scaled and rotated by the PPA) and photos saved as JPEG (hardware encoder) in `/sdcard/DCIM`. The sensor is powered down when the app is in the background.
 - **Gallery app**: the photos of `/sdcard/DCIM` as a grid of thumbnails, newest first, with a viewer (previous / next by buttons or swipe) and delete. Photos are decoded by the hardware JPEG decoder and scaled by the PPA.
 - **Weather app**: current conditions and a 7-day forecast from [open-meteo.com](https://open-meteo.com) (HTTPS, no key) for a city picked from a list. Needs Wi-Fi with Internet access.
+- **Music app**: plays MP3, WAV, FLAC, AAC, M4A and OGG files from the `Music` folder and the top of the card on the speaker (mono), with play / pause, previous, next and auto-advance. It keeps playing in the background and with the screen off, and follows the phone volume.
+- **Files app**: browse the microSD card, see the details of a file, delete files and empty folders.
 - **Lock screen**: flip clock, date, Wi-Fi and battery, slide to unlock, charging effect. The wallpaper is the launcher one, blurred at boot.
 - **Screen power**: the screen dims after the timeout, then goes off with the lock screen up. While it is off, LVGL is paused and Wi-Fi uses modem sleep.
 - **Keys**:
@@ -55,7 +57,7 @@ Settings are stored in NVS (namespace `phone`).
   - `phone_power.cpp`: battery polling, power key, power menu (AXP2101 through the BSP).
   - `phone_lock.cpp`: lock screen and screen power policy.
   - `phone_volume.cpp`: volume keys and volume panel.
-  - `phone_audio.cpp`: speaker volume and the confirmation beep.
+  - `phone_audio.cpp`: speaker volume, the confirmation beep, and lending the speaker to the Music app.
   - `phone_storage.cpp`: microSD mount.
   - `phone_locale.cpp`: language, time zone and small NVS preferences.
   - `fonts/`: UI fonts with Vietnamese glyphs (Be Vietnam Pro, 12 to 28 px, SIL Open Font License, see `fonts/OFL.txt`) and the 120 px clock digits.
@@ -64,6 +66,8 @@ Settings are stored in NVS (namespace `phone`).
 - `components/phone_app_camera/`: the Camera app.
 - `components/phone_app_gallery/`: the Gallery app.
 - `components/phone_app_weather/`: the Weather app.
+- `components/phone_app_music/`: the Music app (decoders from `espressif/esp_audio_codec`, fetched by the component manager).
+- `components/phone_app_files/`: the Files app.
 - `components/brookesia_app_calculator/`, `components/brookesia_app_game_2048/`: Calculator and 2048 from ESP-Brookesia, ported from its speaker system to the phone system. 2048 ignores swipes that start on a screen edge or on the lock screen.
 - `components/brookesia_core/`: ESP-Brookesia core (phone system, GUI, stylesheets).
 - `components/brookesia_app_squareline_demo/`: Squareline demo app.
