@@ -550,6 +550,15 @@ void build_ui()
     lv_obj_align(make_round_button(s_viewer, LV_SYMBOL_RIGHT, on_next), LV_ALIGN_RIGHT_MID, -10, 0);
     s_view_delete = make_round_button(s_viewer, LV_SYMBOL_TRASH, on_delete);
     lv_obj_align(s_view_delete, LV_ALIGN_BOTTOM_MID, 0, -40);
+
+    /* The strip where the swipe-up for the navigation bar starts: a touch there must not scroll
+     * the list under it. The system reads that gesture straight from the touch panel. */
+    lv_obj_t *guard = lv_obj_create(root);
+    lv_obj_remove_style_all(guard);
+    lv_obj_set_size(guard, LV_PCT(100), 36);
+    lv_obj_align(guard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(guard, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(guard, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 bool init_codec()
