@@ -82,3 +82,8 @@ CONFIG_CAMERA_SC2336=y
 CONFIG_CAMERA_OV2710=y
 # Auto exposure, white balance and color correction for the Camera app
 CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+
+# Second screen app: USB device with a vendor interface (picture) and HID (touch)
+CONFIG_TINYUSB_VENDOR_COUNT=1
+CONFIG_TINYUSB_VENDOR_RX_BUFSIZE=8192
+CONFIG_TINYUSB_HID_COUNT=1
