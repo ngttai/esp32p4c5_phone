@@ -2,7 +2,7 @@ idf_component_register(
     SRCS phone_app_music.cpp phone_music_icon.c music/id3_parser.cpp music/music_library.cpp music/music_service.cpp
     INCLUDE_DIRS .
     PRIV_INCLUDE_DIRS music
-    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings pthread
+    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings pthread esp_driver_jpeg esp_driver_ppa
     WHOLE_ARCHIVE
 )
 

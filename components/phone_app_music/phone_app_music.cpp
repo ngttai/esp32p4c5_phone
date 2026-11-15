@@ -5,6 +5,8 @@
  * - music::Service (music/, from esp_chatbot_v1) lists the files and reads the ID3 tag and the
  *   duration of the MP3 files in a background thread: the track that is playing first, then the
  *   rows on the screen, and nothing while the list is being scrolled.
+ * - The cover is the JPEG picture of the ID3v2 tag, when there is one: decoded by the hardware
+ *   JPEG decoder and scaled by the PPA before the track starts. Otherwise a colored placeholder.
  * - A player task reads the file, decodes it with esp_audio_codec and writes mono 16-bit PCM to
  *   the speaker codec. It keeps playing while the app is in the background and while the screen
  *   is off; closing the app stops it. The volume is the phone volume, followed while playing.
@@ -18,6 +20,9 @@
 #include <strings.h>
 #include <vector>
 #include "decoder/esp_audio_dec_default.h"
+#include "driver/jpeg_decode.h"
+#include "driver/ppa.h"
+#include "esp_heap_caps.h"
 #include "simple_dec/esp_audio_simple_dec.h"
 #include "simple_dec/esp_audio_simple_dec_default.h"
 #include "esp_log.h"
@@ -81,6 +86,166 @@ const Palette PALETTE_IDLE = {0x242936, 0x30475E, 0x3A4660, 0x2C3548};
 enum Repeat { REPEAT_OFF, REPEAT_ALL, REPEAT_ONE, REPEAT_COUNT };
 
 std::unique_ptr<music::Service> s_lib;  // created in run(), destroyed in close(); the player only runs in between
+
+/* ---- cover ---- */
+
+bool has_ext(const char *path, const char *ext);
+
+constexpr int COVER_ALIGN = 128;            // L2 cache line, required for PPA output buffers
+constexpr size_t COVER_FILE_MAX = 3 * 1024 * 1024;
+constexpr int COVER_SIDE_MAX = 2048;
+enum { COVER_NONE = -1, COVER_ABSENT = 2 }; // s_cover_ready: nothing new, buffer 0 or 1, no cover
+
+uint8_t *s_cover_buf[2];                    // ART x ART RGB565
+size_t s_cover_buf_size;
+lv_image_dsc_t s_cover_dsc[2];
+int s_cover_side[2];
+int s_cover_front = -1;                     // buffer on the screen (LVGL task)
+std::atomic<int> s_cover_ready{COVER_NONE}; // set by the player task, taken by the LVGL timer
+
+uint32_t be32(const uint8_t *p)
+{
+    return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 | static_cast<uint32_t>(p[2]) << 8 | p[3];
+}
+
+uint32_t syncsafe32(const uint8_t *p)
+{
+    return static_cast<uint32_t>(p[0] & 0x7F) << 21 | static_cast<uint32_t>(p[1] & 0x7F) << 14 |
+           static_cast<uint32_t>(p[2] & 0x7F) << 7 | (p[3] & 0x7F);
+}
+
+/*
+ * Find the attached picture of an ID3v2 tag (APIC, or PIC in v2.2) and return the offset and
+ * the size of its JPEG data. Other picture formats (PNG) are not handled.
+ */
+bool find_cover(FILE *file, long &offset, size_t &size)
+{
+    uint8_t h[10];
+    if (fseek(file, 0, SEEK_SET) != 0 || fread(h, 1, 10, file) != 10 || memcmp(h, "ID3", 3) != 0) {
+        return false;
+    }
+    const int ver = h[3];
+    const long tag_end = 10 + static_cast<long>(syncsafe32(h + 6));
+    long pos = 10;
+    if (h[5] & 0x40) {                      /* extended header */
+        uint8_t e[4];
+        if (fread(e, 1, 4, file) != 4) {
+            return false;
+        }
+        pos += ver == 4 ? syncsafe32(e) : be32(e) + 4;
+    }
+    const int head = ver == 2 ? 6 : 10;
+    while (pos + head < tag_end) {
+        uint8_t f[10];
+        if (fseek(file, pos, SEEK_SET) != 0 || fread(f, 1, head, file) != static_cast<size_t>(head) || f[0] == 0) {
+            return false;                   /* padding or the end of the tag */
+        }
+        const uint32_t len = ver == 2 ? (static_cast<uint32_t>(f[3]) << 16 | static_cast<uint32_t>(f[4]) << 8 | f[5])
+                             : (ver == 4 ? syncsafe32(f + 4) : be32(f + 4));
+        const bool picture = ver == 2 ? memcmp(f, "PIC", 3) == 0 : memcmp(f, "APIC", 4) == 0;
+        if (picture && len > 16) {
+            /* text encoding, MIME type, picture type and description come first: look for the
+             * JPEG start marker instead of parsing them */
+            uint8_t probe[512];
+            const size_t n = fread(probe, 1, len < sizeof(probe) ? len : sizeof(probe), file);
+            for (size_t i = 0; i + 2 < n; i++) {
+                if (probe[i] == 0xFF && probe[i + 1] == 0xD8 && probe[i + 2] == 0xFF) {
+                    offset = pos + head + static_cast<long>(i);
+                    size = len - i;
+                    return true;
+                }
+            }
+            return false;
+        }
+        pos += head + static_cast<long>(len);
+    }
+    return false;
+}
+
+/* Decode the cover of a file into buffer `slot`; false when there is none or it cannot be decoded */
+bool load_cover(const std::string &path, int slot)
+{
+    bool ok = false;
+    long offset = 0;
+    size_t size = 0;
+    size_t in_size = 0, out_size = 0;
+    uint8_t *in = nullptr;
+    uint8_t *rgb = nullptr;
+    jpeg_decoder_handle_t dec = nullptr;
+    ppa_client_handle_t ppa = nullptr;
+    const jpeg_decode_memory_alloc_cfg_t in_cfg = {.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER};
+    const jpeg_decode_memory_alloc_cfg_t out_cfg = {.buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER};
+    const jpeg_decode_engine_cfg_t eng_cfg = {.intr_priority = 0, .timeout_ms = 2000};
+    const ppa_client_config_t ppa_cfg = {.oper_type = PPA_OPERATION_SRM};
+    jpeg_decode_picture_info_t info = {};
+
+    FILE *file = has_ext(path.c_str(), ".mp3") ? fopen(path.c_str(), "rb") : nullptr;
+    if (!file || !s_cover_buf[slot] || !find_cover(file, offset, size) || size > COVER_FILE_MAX) {
+        goto done;
+    }
+    in = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(size, &in_cfg, &in_size));
+    if (!in || fseek(file, offset, SEEK_SET) != 0 || fread(in, 1, size, file) != size ||
+            jpeg_decoder_get_info(in, size, &info) != ESP_OK || info.width == 0 || info.height == 0 ||
+            info.width > COVER_SIDE_MAX || info.height > COVER_SIDE_MAX) {
+        goto done;
+    }
+    {
+        const int w = info.width, h = info.height;
+        const int buf_w = (w + 15) & ~15, buf_h = (h + 15) & ~15;
+        rgb = static_cast<uint8_t *>(jpeg_alloc_decoder_mem(static_cast<size_t>(buf_w) * buf_h * 2, &out_cfg, &out_size));
+        const jpeg_decode_cfg_t cfg = {
+            .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+            .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
+            .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
+        };
+        uint32_t len = 0;
+        if (!rgb || jpeg_new_decoder_engine(&eng_cfg, &dec) != ESP_OK ||
+                jpeg_decoder_process(dec, &cfg, in, size, rgb, out_size, &len) != ESP_OK ||
+                ppa_register_client(&ppa_cfg, &ppa) != ESP_OK) {
+            ESP_LOGW(TAG, "cover of %s cannot be decoded (%d x %d)", path.c_str(), w, h);
+            goto done;
+        }
+        /* centered square, scaled in 1/16 steps to at most ART pixels */
+        const int side = w < h ? w : h;
+        int steps = (ART * 16 + side - 1) / side;
+        steps = steps < 1 ? 1 : (steps > 64 ? 64 : steps);
+        const int block = (side < ART * 16 / steps ? side : ART * 16 / steps) & ~1;
+        const int out = block * steps / 16;
+        ppa_srm_oper_config_t op = {};
+        op.in.buffer = rgb;
+        op.in.pic_w = buf_w;
+        op.in.pic_h = buf_h;
+        op.in.block_w = block;
+        op.in.block_h = block;
+        op.in.block_offset_x = (w - block) / 2;
+        op.in.block_offset_y = (h - block) / 2;
+        op.in.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+        op.out.buffer = s_cover_buf[slot];
+        op.out.buffer_size = s_cover_buf_size;
+        op.out.pic_w = out;
+        op.out.pic_h = out;
+        op.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+        op.rotation_angle = PPA_SRM_ROTATION_ANGLE_0;
+        op.scale_x = steps / 16.0f;
+        op.scale_y = steps / 16.0f;
+        op.mode = PPA_TRANS_MODE_BLOCKING;
+        ok = out > 0 && out <= ART && ppa_do_scale_rotate_mirror(ppa, &op) == ESP_OK;
+        s_cover_side[slot] = out;
+    }
+done:
+    if (ppa) {
+        ppa_unregister_client(ppa);
+    }
+    if (dec) {
+        jpeg_del_decoder_engine(dec);
+    }
+    free(rgb);
+    free(in);
+    if (file) {
+        fclose(file);
+    }
+    return ok;
+}
 
 /* ---- player ---- */
 
@@ -264,6 +429,11 @@ void player_task(void *)
             s_paused = false;
             s_error = false;
             s_playing = true;
+            {
+                /* into the buffer that is not on the screen */
+                const int slot = s_cover_front == 0 ? 1 : 0;
+                s_cover_ready = load_cover(path, slot) ? slot : static_cast<int>(COVER_ABSENT);
+            }
             const bool ok = play_file(path);
             s_error = !ok;
             const int req = s_req.exchange(-1);
@@ -360,6 +530,7 @@ lv_obj_t *s_duration;
 lv_obj_t *s_art;
 lv_obj_t *s_art_primary;
 lv_obj_t *s_art_secondary;
+lv_obj_t *s_cover_img;
 lv_obj_t *s_bar;
 lv_obj_t *s_play_label;
 lv_obj_t *s_repeat_label;
@@ -563,6 +734,26 @@ void on_timer(lv_timer_t *)
         update_wanted();
     }
 
+    const int cover = s_cover_ready.exchange(COVER_NONE);
+    if (cover == 0 || cover == 1) {
+        lv_image_dsc_t &dsc = s_cover_dsc[cover];
+        dsc = {};
+        dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+        dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+        dsc.header.w = s_cover_side[cover];
+        dsc.header.h = s_cover_side[cover];
+        dsc.header.stride = s_cover_side[cover] * 2;
+        dsc.data_size = s_cover_side[cover] * s_cover_side[cover] * 2;
+        dsc.data = s_cover_buf[cover];
+        s_cover_front = cover;
+        lv_image_cache_drop(&dsc);
+        lv_image_set_src(s_cover_img, &dsc);
+        lv_obj_center(s_cover_img);
+        lv_obj_remove_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+    } else if (cover == COVER_ABSENT) {
+        lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+    }
+
     const int cur = s_cur;
     const bool playing = s_playing;
     const int state = !playing ? 0 : (s_paused ? 1 : 2);
@@ -732,6 +923,10 @@ void build_ui()
     lv_label_set_text(note, LV_SYMBOL_AUDIO);
     lv_obj_align(note, LV_ALIGN_BOTTOM_RIGHT, -14, -10);
     set_artwork(PALETTE_IDLE);
+    /* the cover of the tag, over the placeholder */
+    s_cover_img = lv_image_create(s_art);
+    lv_obj_center(s_cover_img);
+    lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
 
     s_title = lv_label_create(card);
     lv_obj_set_style_text_font(s_title, phone_font_by_size(24), 0);
@@ -839,6 +1034,14 @@ bool PhoneMusic::run()
     s_repeat = repeat >= 0 && repeat < REPEAT_COUNT ? repeat : REPEAT_OFF;
     s_lib.reset();
     start_library();
+    s_cover_buf_size = (static_cast<size_t>(ART) * ART * 2 + COVER_ALIGN - 1) & ~static_cast<size_t>(COVER_ALIGN - 1);
+    for (auto &buf : s_cover_buf) {
+        if (!buf) {
+            buf = static_cast<uint8_t *>(heap_caps_aligned_calloc(COVER_ALIGN, 1, s_cover_buf_size, MALLOC_CAP_SPIRAM));
+        }
+    }
+    s_cover_front = -1;
+    s_cover_ready = COVER_NONE;
     build_ui();
     lv_timer_create(on_timer, 250, nullptr);
     return true;
@@ -854,6 +1057,15 @@ bool PhoneMusic::close()
 {
     stop_playback();
     s_lib.reset();
+    /* the image still points at a cover buffer until the core deletes the screen */
+    if (s_root && s_cover_img) {
+        lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+        lv_image_set_src(s_cover_img, nullptr);
+    }
+    for (auto &buf : s_cover_buf) {
+        heap_caps_free(buf);
+        buf = nullptr;
+    }
     return true;
 }
 
