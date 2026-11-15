@@ -228,7 +228,8 @@ void build_ui()
     lv_obj_set_style_text_color(root, lv_color_hex(COLOR_TEXT), 0);
     lv_obj_set_style_text_font(root, phone_font_by_size(20), 0);
     lv_obj_set_style_pad_hor(root, 20, 0);
-    lv_obj_set_style_pad_ver(root, 16, 0);
+    lv_obj_set_style_pad_top(root, 16, 0);
+    lv_obj_set_style_pad_bottom(root, 52, 0);     /* the buttons stay above the navigation bar */
     lv_obj_set_flex_flow(root, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(root, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);

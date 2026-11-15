@@ -66,6 +66,7 @@ constexpr uint32_t COLOR_ROW = 0x1E252C;
 constexpr uint32_t COLOR_ACCENT = 0x2F80ED;
 constexpr uint32_t COLOR_TEXT = 0xFFFFFF;
 constexpr uint32_t COLOR_SUB = 0x9AA5B1;
+constexpr int NAV_STRIP_H = 36;     // bottom strip where the swipe-up for the navigation bar starts
 
 lv_obj_t *s_pages[PAGE_COUNT];
 int s_cur_page = PAGE_MAIN;
@@ -276,7 +277,17 @@ lv_obj_t *make_page(lv_obj_t *root, const char *title, int page)
     lv_obj_set_size(p, LV_PCT(100), LV_PCT(100));
     lv_obj_set_flex_flow(p, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_all(p, 16, 0);
+    lv_obj_set_style_pad_bottom(p, 16 + NAV_STRIP_H, 0);    /* the last row scrolls clear of the strip */
     lv_obj_set_style_pad_row(p, 12, 0);
+    /* vertical scrolling with a thin bar on the right that shows while the page moves */
+    lv_obj_set_scroll_dir(p, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(p, LV_SCROLLBAR_MODE_ACTIVE);
+    lv_obj_set_style_width(p, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_radius(p, 2, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(p, lv_color_hex(COLOR_TEXT), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(p, LV_OPA_40, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_right(p, 4, LV_PART_SCROLLBAR);
+    lv_obj_set_style_pad_ver(p, 8, LV_PART_SCROLLBAR);
     lv_obj_add_flag(p, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t *t = lv_label_create(p);
     lv_label_set_text(t, title);
@@ -1316,7 +1327,7 @@ void build_ui()
     lv_textarea_set_placeholder_text(s_pass_ta, T("Nhập mật khẩu", "Enter password"));
     lv_obj_t *kb = lv_keyboard_create(root);
     lv_obj_set_size(kb, LV_PCT(100), 280);
-    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, -NAV_STRIP_H);    /* above the touch guard */
     lv_keyboard_set_textarea(kb, s_pass_ta);
     lv_obj_add_event_cb(kb, on_pass_ready, LV_EVENT_READY, nullptr);
     lv_obj_add_event_cb(kb, on_kb_cancel, LV_EVENT_CANCEL, nullptr);
@@ -1408,6 +1419,15 @@ void build_ui()
     }
     group_end(batt);
     refresh_about();
+
+    /* A touch that starts in the navigation strip must not scroll the page under it. The system
+     * reads that gesture straight from the touch panel. */
+    lv_obj_t *guard = lv_obj_create(root);
+    lv_obj_remove_style_all(guard);
+    lv_obj_set_size(guard, LV_PCT(100), NAV_STRIP_H);
+    lv_obj_align(guard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_add_flag(guard, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(guard, LV_OBJ_FLAG_SCROLLABLE);
 
     show_page(PAGE_MAIN);
 }
