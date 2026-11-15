@@ -83,6 +83,7 @@ lv_obj_t *s_to_check[8];
 lv_obj_t *s_batt_vals[6];
 lv_obj_t *s_bri_val;
 lv_obj_t *s_vol_val;
+lv_obj_t *s_vol_slider;
 lv_obj_t *s_mute_sw;
 bool s_muted;
 lv_obj_t *s_wifi_sw;
@@ -1045,6 +1046,32 @@ void refresh_about()
     lv_label_set_text(s_batt_vals[5], buf);
 }
 
+/* Follow volume changes made with the volume keys while the Sound page is open */
+void sync_sound_page()
+{
+    if (lv_obj_has_state(s_vol_slider, LV_STATE_PRESSED)) {
+        return;                 // the user is dragging the slider
+    }
+    const int level = phone_audio_get_volume();
+    const bool muted = level == 0;
+    if (muted != s_muted) {
+        s_muted = muted;
+        if (muted) {
+            lv_obj_add_state(s_mute_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_remove_state(s_mute_sw, LV_STATE_CHECKED);
+        }
+    }
+    if (muted) {
+        lv_label_set_text(s_vol_val, T("Tắt tiếng", "Muted"));
+    } else {
+        if (lv_slider_get_value(s_vol_slider) != level) {
+            lv_slider_set_value(s_vol_slider, level, LV_ANIM_OFF);
+        }
+        lv_label_set_text_fmt(s_vol_val, "%d%%", level);
+    }
+}
+
 void on_timer(lv_timer_t *t)
 {
     if (s_scan_done.exchange(false)) {
@@ -1056,6 +1083,8 @@ void on_timer(lv_timer_t *t)
     if (s_cur_page == PAGE_WIFI) {
         refresh_wifi_status();
         refresh_saved();
+    } else if (s_cur_page == PAGE_SOUND) {
+        sync_sound_page();
     } else if (s_cur_page == PAGE_ABOUT) {
         static int tick;
         if ((++tick % 4) == 0) {
@@ -1065,8 +1094,8 @@ void on_timer(lv_timer_t *t)
 }
 
 
-void build_slider_card(lv_obj_t *root, const char *title, const char *caption, int page, int min, int value,
-                       lv_event_cb_t cb, lv_event_cb_t done_cb, lv_obj_t **val_out)
+lv_obj_t *build_slider_card(lv_obj_t *root, const char *title, const char *caption, int page, int min, int value,
+                            lv_event_cb_t cb, lv_event_cb_t done_cb, lv_obj_t **val_out)
 {
     lv_obj_t *p = make_page(root, title, page);
     lv_obj_t *card = make_group(p, caption);
@@ -1089,6 +1118,7 @@ void build_slider_card(lv_obj_t *root, const char *title, const char *caption, i
     lv_slider_set_value(s, value, LV_ANIM_OFF);
     lv_obj_add_event_cb(s, cb, LV_EVENT_VALUE_CHANGED, nullptr);
     lv_obj_add_event_cb(s, done_cb, LV_EVENT_RELEASED, nullptr);
+    return s;
 }
 
 constexpr int TZ_MAX = 24;
@@ -1306,8 +1336,8 @@ void build_ui()
     to_update_checks();
 
     s_muted = phone_pref_get("mute", 0) != 0;
-    build_slider_card(root, T("Âm thanh", "Sound"), T("Âm lượng", "Volume"), PAGE_SOUND, 0,
-                      phone_pref_get("vol", 60), on_volume, on_volume_done, &s_vol_val);
+    s_vol_slider = build_slider_card(root, T("Âm thanh", "Sound"), T("Âm lượng", "Volume"), PAGE_SOUND, 0,
+                                     phone_pref_get("vol", 60), on_volume, on_volume_done, &s_vol_val);
     lv_obj_t *sound_opts = make_group(s_pages[PAGE_SOUND], T("Tùy chọn", "Options"));
     s_mute_sw = switch_row(sound_opts, T("Tắt tiếng", "Mute"), s_muted, on_mute_toggle);
     group_end(sound_opts);

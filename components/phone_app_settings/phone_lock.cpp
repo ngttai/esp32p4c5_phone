@@ -946,6 +946,12 @@ extern "C" const char *phone_lock_timeout_label(int index)
     return phone_lang_get() == PHONE_LANG_VI ? vi[index] : en[index];
 }
 
+extern "C" bool phone_lock_is_locked(void)
+{
+    const int st = s_state.load();
+    return st == ST_LOCKED || st == ST_OFF;
+}
+
 extern "C" int phone_lock_timeout_get(void)
 {
     int i = phone_pref_get("scr_to", TIMEOUT_DEFAULT);

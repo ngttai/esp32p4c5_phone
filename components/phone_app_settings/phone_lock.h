@@ -26,6 +26,9 @@ void phone_lock_on_charger(void);
 /** Make sure the screen is on and LVGL runs, e.g. before showing the power menu (any task except LVGL). */
 void phone_lock_wake(void);
 
+/** True while the lock screen is shown or the screen is off. */
+bool phone_lock_is_locked(void);
+
 /** Screen timeout choices for the settings page; index stored in NVS ("scr_to"). */
 int phone_lock_timeout_count(void);
 const char *phone_lock_timeout_label(int index);

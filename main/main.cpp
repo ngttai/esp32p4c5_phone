@@ -14,6 +14,7 @@
 #include "phone_power.h"
 #include "phone_storage.h"
 #include "phone_lock.h"
+#include "phone_volume.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
@@ -110,6 +111,8 @@ extern "C" void app_main(void)
         phone_storage_start();
         /* Dim / lock screen / screen off on inactivity and on the power key */
         phone_lock_start();
+        /* BOOT / IO0 as volume up / down */
+        phone_volume_start();
 
         /* Create a timer to update the clock and the Wi-Fi icon */
         lv_timer_create([](lv_timer_t *t) {
