@@ -24,7 +24,7 @@ void beep_task(void *)
 {
     static int16_t tone[SAMPLES];
     if (!s_spk) {
-        s_spk = bsp_audio_speaker_init();
+        s_spk = bsp_audio_codec_speaker_init();
     }
     esp_codec_dev_sample_info_t fs = {};
     fs.sample_rate = RATE;
