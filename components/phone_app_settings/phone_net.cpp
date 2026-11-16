@@ -192,6 +192,11 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
             phone_net_enable();
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             bool retry;
+            if (data) {
+                /* why the link dropped: needed to tell a weak signal from a rejected or expired association */
+                auto *ev = static_cast<wifi_event_sta_disconnected_t *>(data);
+                ESP_LOGW(TAG, "Wifi down: reason %d, rssi %d", ev->reason, ev->rssi);
+            }
             {
                 Lock l;
                 retry = s_auto && !s_user_op && s_list.count > 0;

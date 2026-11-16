@@ -4,7 +4,7 @@
 
 Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 panel, ST7102 over MIPI DSI, ST7123 touch), with a settings app and the system behavior of a small phone:
 
-- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Video, Files, Second screen, USB camera, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
+- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Video, Files, Second screen, USB camera, AI Assistant, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
 - **Settings app** (Vietnamese / English):
   - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect, forget.
   - Display: brightness, screen timeout.
@@ -24,6 +24,7 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
   ```
 - **Second screen app**: the board as a USB display with touch for a PC, 480 x 800 portrait or 800 x 480 landscape (turned by the PPA), on the USB HS Type-C socket (high-speed device 303A:2986, "udisp" protocol of the [xfz1986 USB graphic driver](https://github.com/chuanjinpang/win10_idd_xfz1986_usb_graphic_driver_display), for Windows and Linux). The PC sends JPEG pictures, decoded by the hardware decoder; touches go back as a HID touch screen. Measured: about 8.6 MB/s from the PC, 30 to 58 pictures per second shown.
 - **USB camera app**: live picture of a UVC webcam on the Type-A host socket (MJPEG, up to 1280 x 720, hardware JPEG decoder) and photos saved in `/sdcard/DCIM`. The app turns the 5 V boost on for the socket and releases the USB port in the background. Leave the USB HS Type-C socket unplugged while a webcam is in use: both sockets share one port.
+- **AI Assistant app** (work in progress): voice assistant on the [xiaozhi.me](https://xiaozhi.me) service through the `esp_xiaozhi` component. For now it fetches the device configuration and shows the activation code to enter on the site; the voice conversation is not there yet.
 - **Files app**: browse the microSD card, see the details of a file, delete files and empty folders.
 - **Lock screen**: flip clock, date, Wi-Fi and battery, slide to unlock, charging effect. The wallpaper is the launcher one, blurred at boot.
 - **Screen power**: the screen dims after the timeout, then goes off with the lock screen up. While it is off, LVGL is paused and Wi-Fi uses modem sleep.
@@ -76,6 +77,8 @@ Settings are stored in NVS (namespace `phone`).
 - `components/phone_app_music/`: the Music app (decoders from `espressif/esp_audio_codec`, fetched by the component manager). `music/` holds the ID3 parser, track library and background metadata service, adapted from the author's esp_chatbot_v1 project.
 - `components/phone_app_video/`: the Video app.
 - `components/phone_app_files/`: the Files app.
+- `components/phone_app_assistant/`: the AI Assistant app.
+- `components/esp_xiaozhi/`: Xiaozhi protocol component of esp-iot-solution (Apache-2.0), copied from the author's esp_chatbot_v1 project; the language reported to the server is a Kconfig option here.
 - `components/phone_app_usb_camera/`: the USB camera app (UVC class driver from `espressif/usb_host_uvc`, fetched by the component manager).
 - `components/phone_app_second_screen/`: the Second screen app (USB device stack from `espressif/esp_tinyusb`, fetched by the component manager).
 - `components/brookesia_app_calculator/`, `components/brookesia_app_game_2048/`: Calculator and 2048 from ESP-Brookesia, ported from its speaker system to the phone system. 2048 ignores swipes that start on a screen edge or on the lock screen.
