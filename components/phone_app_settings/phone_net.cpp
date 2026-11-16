@@ -24,6 +24,8 @@ namespace {
 
 constexpr int POLL_MS = 5000;
 constexpr uint64_t RETRY_US = 5000000;
+constexpr uint64_t RETRY_DROP_US = 1000000;   // first retry after an established link was dropped
+constexpr int SAME_TRIES = 3;                 // attempts on one network before moving to the next saved one
 constexpr int MAX_SAVED = 5;
 constexpr char NVS_NS[] = "phone";
 constexpr char NVS_KEY[] = "wifi_aps";
@@ -44,6 +46,7 @@ SemaphoreHandle_t s_mtx;
 phone_net_status_t s_st;
 SavedList s_list;                 // guarded by s_mtx
 int s_try = 0;                    // index in s_list of the current attempt; guarded by s_mtx
+int s_fail = 0;                   // consecutive failures on s_try; guarded by s_mtx
 std::atomic<bool> s_ready{false};
 char s_c5_ver[16];                // written once before s_c5_ver_ok is set
 std::atomic<bool> s_c5_ver_ok{false};
@@ -192,6 +195,7 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
             phone_net_enable();
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             bool retry;
+            bool was_up;
             if (data) {
                 /* why the link dropped: needed to tell a weak signal from a rejected or expired association */
                 auto *ev = static_cast<wifi_event_sta_disconnected_t *>(data);
@@ -200,15 +204,21 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
             {
                 Lock l;
                 retry = s_auto && !s_user_op && s_list.count > 0;
+                was_up = s_st.wifi_connected;
                 if (retry) {
-                    s_try = (s_try + 1) % s_list.count;
+                    /* a router drop of a working link is retried on the same network first; only
+                     * repeated failures move on to the next saved one */
+                    if (++s_fail >= SAME_TRIES) {
+                        s_fail = 0;
+                        s_try = (s_try + 1) % s_list.count;
+                    }
                 }
                 s_st.wifi_connected = false;
                 s_st.wifi_connecting = retry;
                 s_st.rssi = 0;
             }
             if (retry) {
-                esp_timer_start_once(s_retry, RETRY_US);
+                esp_timer_start_once(s_retry, was_up ? RETRY_DROP_US : RETRY_US);
             }
         }
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
@@ -238,6 +248,7 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
             s_pend_ssid[0] = '\0';
             s_pend_pass[0] = '\0';
             s_try = 0;
+            s_fail = 0;
         }
         ESP_LOGI(TAG, "Wifi up %s", s_st.ip);
         sntp_start_once();
@@ -271,6 +282,8 @@ bool wifi_start()
         snprintf(s_c5_ver, sizeof(s_c5_ver), "%u.%u.%u", (unsigned)ver.major1, (unsigned)ver.minor1, (unsigned)ver.patch1);
         s_c5_ver_ok = true;
     }
+    /* the C5 keeps its settings across P4 resets: do not inherit a band restriction */
+    esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
     s_ready = true;
     ESP_LOGI(TAG, "Wifi started");
     /* STA_START fired inside bsp_wifi_init(), before the handlers above existed */
@@ -368,6 +381,7 @@ extern "C" void phone_net_enable(void)
             s_user_op = false;
             s_auto = true;
             s_try = 0;
+            s_fail = 0;
         }
     }
     if (go) {
@@ -418,6 +432,7 @@ extern "C" void phone_net_forget_ssid(const char *ssid)
         } else if (active) {
             // the disconnect event advances s_try by one, so point it at the first remaining entry
             s_try = s_list.count - 1;
+            s_fail = SAME_TRIES - 1;
         } else if (s_try >= s_list.count) {
             s_try = 0;
         }
@@ -465,6 +480,7 @@ extern "C" void phone_net_connect(const char *ssid, const char *pass)
         strlcpy(s_pend_ssid, ssid, sizeof(s_pend_ssid));
         strlcpy(s_pend_pass, pass ? pass : "", sizeof(s_pend_pass));
         s_try = 0;
+        s_fail = 0;
         s_user_op = true;
         s_auto = false;
     }
