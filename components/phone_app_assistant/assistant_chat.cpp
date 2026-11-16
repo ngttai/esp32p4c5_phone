@@ -21,6 +21,7 @@
 #include "encoder/impl/esp_opus_enc.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "assistant_mcp.h"
 #include "esp_mcp_engine.h"
 #include "esp_xiaozhi_chat.h"
 #include "freertos/FreeRTOS.h"
@@ -437,9 +438,12 @@ void session_task(void *)
         config.has_websocket_config = s_has_websocket;
         config.has_mqtt_config = s_has_mqtt && !s_has_websocket;
         ESP_LOGI(TAG, "transport: %s", config.has_mqtt_config ? "MQTT + UDP" : "WebSocket");
-        /* esp_xiaozhi needs an MCP engine to start, even with no device tool registered yet */
+        /* esp_xiaozhi needs an MCP engine to start; the device tools are what the server can call */
         esp_mcp_t *mcp = nullptr;
         ok = esp_mcp_create(&mcp) == ESP_OK;
+        if (ok) {
+            assistant_mcp_register(mcp);
+        }
         config.mcp_engine = mcp;
         config.owns_mcp_engine = true;
         if (ok && esp_xiaozhi_chat_init(&config, &s_chat) != ESP_OK) {
