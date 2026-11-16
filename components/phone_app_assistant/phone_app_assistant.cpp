@@ -241,6 +241,7 @@ void add_bubble(const char *text, bool user, bool notice)
     } else {
         lv_obj_set_style_bg_opa(label, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(label, lv_color_hex(user ? COLOR_ACCENT : COLOR_CARD), 0);
+        lv_obj_set_style_text_font(label, &phone_font_cjk_20, 0);     /* the assistant may answer in Chinese */
     }
     lv_label_set_text(label, text);
     s_bubble_count++;
