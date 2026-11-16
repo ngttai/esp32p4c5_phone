@@ -1,7 +1,11 @@
+file(GLOB EMOTE_FILES emote/*.eaf)
+
 idf_component_register(
-    SRCS phone_app_assistant.cpp phone_assistant_icon.c
+    SRCS phone_app_assistant.cpp assistant_chat.cpp assistant_emote.cpp phone_assistant_icon.c eaf/gfx_eaf_dec.c
     INCLUDE_DIRS .
-    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings esp_xiaozhi
+    PRIV_INCLUDE_DIRS eaf
+    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings esp_xiaozhi esp_event
+    EMBED_FILES ${EMOTE_FILES}
     WHOLE_ARCHIVE
 )
 

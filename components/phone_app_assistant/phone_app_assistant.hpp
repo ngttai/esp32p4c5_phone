@@ -14,6 +14,7 @@ protected:
     bool run() override;
     bool back() override;
     bool close() override;
+    bool pause() override;
     bool resume() override;
 
 private:

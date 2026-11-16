@@ -1,0 +1,3 @@
+dependencies:
+  # Opus encoder and decoder
+  espressif/esp_audio_codec: "^2.5"
