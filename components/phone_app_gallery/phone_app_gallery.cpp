@@ -75,6 +75,7 @@ struct Picture {                // one decoded JPEG
     int buf_w, buf_h;           // size of the decoded buffer (rounded up to 16)
 };
 
+const char *s_hold_name;    // holder of the card while the app runs (phone_storage_hold)
 lv_obj_t *s_root;
 lv_obj_t *s_grid;
 lv_obj_t *s_count;
@@ -617,6 +618,8 @@ PhoneGallery::~PhoneGallery()
 
 bool PhoneGallery::run()
 {
+    s_hold_name = phone_tr("Thư viện ảnh", "Gallery");
+    phone_storage_hold(s_hold_name);      /* the thumbnail worker reads in the background */
     if (!init_codec()) {
         ESP_LOGE(TAG, "no JPEG decoder or PPA");
         deinit_codec();
@@ -646,6 +649,7 @@ bool PhoneGallery::back()
 bool PhoneGallery::close()
 {
     stop_worker();
+    phone_storage_release(s_hold_name);
     /* the widgets still point at the buffers until the core deletes the screen */
     if (s_root) {
         lv_obj_clean(s_root);

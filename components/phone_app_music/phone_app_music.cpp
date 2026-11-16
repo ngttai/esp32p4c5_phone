@@ -85,6 +85,7 @@ const Palette PALETTE_IDLE = {0x242936, 0x30475E, 0x3A4660, 0x2C3548};
 
 enum Repeat { REPEAT_OFF, REPEAT_ALL, REPEAT_ONE, REPEAT_COUNT };
 
+const char *s_hold_name;    // holder of the card while the app runs (phone_storage_hold)
 std::unique_ptr<music::Service> s_lib;  // created in run(), destroyed in close(); the player only runs in between
 
 /* ---- cover ---- */
@@ -1027,6 +1028,8 @@ PhoneMusic::~PhoneMusic()
 
 bool PhoneMusic::run()
 {
+    s_hold_name = phone_tr("Nhạc", "Music");
+    phone_storage_hold(s_hold_name);      /* files stay open in the background */
     stop_playback();
     s_cur = -1;
     s_error = false;
@@ -1057,6 +1060,7 @@ bool PhoneMusic::close()
 {
     stop_playback();
     s_lib.reset();
+    phone_storage_release(s_hold_name);
     /* the image still points at a cover buffer until the core deletes the screen */
     if (s_root && s_cover_img) {
         lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);

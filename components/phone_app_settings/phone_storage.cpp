@@ -1,5 +1,6 @@
 #include "phone_storage.h"
 #include <atomic>
+#include <cstring>
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
@@ -12,6 +13,9 @@
 namespace {
 
 std::atomic<int> s_state{PHONE_STORAGE_DISABLED};
+constexpr int MAX_HOLDERS = 4;
+const char *s_holders[MAX_HOLDERS];
+portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
 void mount_task(void *)
 {
@@ -55,4 +59,86 @@ extern "C" phone_storage_state_t phone_storage_get(uint64_t *total, uint64_t *fr
         }
     }
     return state;
+}
+
+extern "C" void phone_storage_hold(const char *who)
+{
+    portENTER_CRITICAL(&s_lock);
+    for (auto &h : s_holders) {
+        if (h == who) {
+            break;
+        }
+        if (!h) {
+            h = who;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+extern "C" void phone_storage_release(const char *who)
+{
+    portENTER_CRITICAL(&s_lock);
+    for (auto &h : s_holders) {
+        if (h == who) {
+            h = nullptr;
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+extern "C" int phone_storage_holders(char *buf, size_t len)
+{
+    const char *names[MAX_HOLDERS];
+    int n = 0;
+    portENTER_CRITICAL(&s_lock);
+    for (const char *h : s_holders) {
+        if (h) {
+            names[n++] = h;
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (buf && len) {
+        buf[0] = '\0';
+        for (int i = 0; i < n; i++) {
+            if (i) {
+                strlcat(buf, ", ", len);
+            }
+            strlcat(buf, names[i], len);
+        }
+    }
+    return n;
+}
+
+extern "C" esp_err_t phone_storage_lend(sdmmc_card_t **card)
+{
+    if (s_state != PHONE_STORAGE_MOUNTED || phone_storage_holders(nullptr, 0) > 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = bsp_sdcard_unmount();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "unmount: %s", esp_err_to_name(err));
+        return err;
+    }
+    s_state = PHONE_STORAGE_USB;
+    err = bsp_sdcard_raw_init(card);
+    if (err != ESP_OK) {
+        phone_storage_take_back();
+    }
+    return err;
+}
+
+extern "C" esp_err_t phone_storage_take_back(void)
+{
+    if (s_state != PHONE_STORAGE_USB) {
+        return ESP_OK;
+    }
+    bsp_sdcard_raw_deinit();
+    /* The BSP never formats the card when mounting fails */
+    esp_err_t err = bsp_sdcard_mount();
+    s_state = err == ESP_OK ? PHONE_STORAGE_MOUNTED : PHONE_STORAGE_NO_CARD;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "remount: %s", esp_err_to_name(err));
+    }
+    return err;
 }

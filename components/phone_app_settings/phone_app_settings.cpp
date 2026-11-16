@@ -1015,6 +1015,9 @@ void refresh_about()
     case PHONE_STORAGE_NO_CARD:
         snprintf(buf, sizeof(buf), "%s", T("Không có thẻ", "No card"));
         break;
+    case PHONE_STORAGE_USB:
+        snprintf(buf, sizeof(buf), "%s", T("Đang dùng qua USB", "In use over USB"));
+        break;
     default:
         snprintf(buf, sizeof(buf), "%s", T("Tắt", "Disabled"));
         break;

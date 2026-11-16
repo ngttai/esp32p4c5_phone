@@ -55,6 +55,7 @@ namespace {
 const char *TAG = "phone_video";
 
 constexpr const char *CARD = "/sdcard";
+const char *const HOLD_NAME = "Video";     // holder of the card while the app runs (phone_storage_hold)
 constexpr int MAX_FILES = 200;
 constexpr int SCAN_DEPTH = 2;
 constexpr int ALIGN = 128;                  // L2 cache line, required for PPA output buffers
@@ -754,6 +755,7 @@ PhoneVideo::~PhoneVideo()
 
 bool PhoneVideo::run()
 {
+    phone_storage_hold(HOLD_NAME);          /* a paused video keeps its file open */
     if (!s_done) {
         s_done = xSemaphoreCreateBinary();
     }
@@ -781,6 +783,7 @@ bool PhoneVideo::back()
 bool PhoneVideo::close()
 {
     stop_player();
+    phone_storage_release(HOLD_NAME);
     /* the image still points at a picture buffer until the core deletes the screen */
     if (s_img) {
         lv_obj_add_flag(s_img, LV_OBJ_FLAG_HIDDEN);
