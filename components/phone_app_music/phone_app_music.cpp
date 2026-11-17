@@ -486,6 +486,26 @@ void stop_playback()
 
 /* ---- library ---- */
 
+/* Stops the library service away from the LVGL task. pthread_join() of ESP-IDF waits with
+ * xTaskNotifyWait(), which any task notification ends, and the LVGL task gets them all the time
+ * from the adapter: a join there returned early and deleted the scanning thread while it was still
+ * running (holding the pthread list lock), so the next thread creation hung the UI (Music closed
+ * from Recents, then opened again) */
+void retire_library()
+{
+    music::Service *lib = s_lib.release();
+    if (!lib) {
+        return;
+    }
+    auto stop = [](void *arg) {
+        delete static_cast<music::Service *>(arg);
+        vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(stop, "music_stop", 4096, lib, 3, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "cannot stop the library service");      // leaked rather than joined here
+    }
+}
+
 void start_library()
 {
     music::Service::Config config;
@@ -1035,7 +1055,7 @@ bool PhoneMusic::run()
     s_error = false;
     const int repeat = phone_pref_get("mus_rep", REPEAT_OFF);
     s_repeat = repeat >= 0 && repeat < REPEAT_COUNT ? repeat : REPEAT_OFF;
-    s_lib.reset();
+    retire_library();
     start_library();
     s_cover_buf_size = (static_cast<size_t>(ART) * ART * 2 + COVER_ALIGN - 1) & ~static_cast<size_t>(COVER_ALIGN - 1);
     for (auto &buf : s_cover_buf) {
@@ -1059,7 +1079,7 @@ bool PhoneMusic::back()
 bool PhoneMusic::close()
 {
     stop_playback();
-    s_lib.reset();
+    retire_library();
     phone_storage_release(s_hold_name);
     /* the image still points at a cover buffer until the core deletes the screen */
     if (s_root && s_cover_img) {
