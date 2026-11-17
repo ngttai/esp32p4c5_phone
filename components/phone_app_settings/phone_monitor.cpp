@@ -65,6 +65,9 @@ void top_tasks(char *out, size_t len)
                 break;
             }
         }
+        if (prev > st[i].ulRunTimeCounter) {
+            prev = 0;           /* a new task in the memory of a deleted one: same handle, fresh counter */
+        }
         if (strncmp(st[i].pcTaskName, "IDLE", 4) != 0) {
             use[m++] = {st[i].pcTaskName, st[i].ulRunTimeCounter - prev};
         }
