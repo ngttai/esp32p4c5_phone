@@ -17,6 +17,7 @@
 #include "phone_volume.h"
 #include "phone_monitor.h"
 #include "phone_quick.h"
+#include "phone_boot_splash.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
@@ -49,6 +50,14 @@ extern "C" void app_main(void)
 
     /* Start display (LVGL adapter + panel + touch) */
     ESP_UTILS_CHECK_NULL_EXIT(bsp_display_start(), "Start display failed");
+    /* Animated logo while the phone starts */
+    if (bsp_display_lock(0)) {
+        phone_boot_splash_show();
+        bsp_display_unlock();
+        /* the LVGL task draws the first frame before the backlight comes on, instead of the blank
+         * frame buffer (lv_refr_now() here overflows the main task stack) */
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
     ESP_UTILS_CHECK_ERROR_EXIT(bsp_display_brightness_set(phone_pref_get("bri", 100)), "Turn on display backlight failed");
 
     /* Configure GUI lock */
@@ -98,6 +107,8 @@ extern "C" void app_main(void)
 
         /* Begin the phone */
         ESP_UTILS_CHECK_FALSE_EXIT(phone->begin(), "Begin failed");
+        /* Brookesia has put its own system layer in place: the splash moves onto it */
+        phone_boot_splash_raise();
         // assert(phone->getDisplay().showContainerBorder() && "Show container border failed");
 
         /* Init and install apps from registry */
@@ -119,6 +130,8 @@ extern "C" void app_main(void)
         phone_monitor_init();
         /* Quick settings: pull down from the top edge */
         phone_quick_start(phone);
+        /* Everything is up: the splash fades out after its animation */
+        phone_boot_splash_ready();
 
         /* Create a timer to update the clock and the Wi-Fi icon */
         lv_timer_create([](lv_timer_t *t) {
