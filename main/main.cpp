@@ -15,6 +15,7 @@
 #include "phone_storage.h"
 #include "phone_lock.h"
 #include "phone_volume.h"
+#include "phone_monitor.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
@@ -113,6 +114,8 @@ extern "C" void app_main(void)
         phone_lock_start();
         /* BOOT / IO0 as volume up / down */
         phone_volume_start();
+        /* CPU / RAM monitor over every screen when turned on in Settings > Debug */
+        phone_monitor_init();
 
         /* Create a timer to update the clock and the Wi-Fi icon */
         lv_timer_create([](lv_timer_t *t) {

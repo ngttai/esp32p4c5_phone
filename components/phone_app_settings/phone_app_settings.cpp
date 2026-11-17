@@ -28,6 +28,9 @@
 #include "phone_locale.h"
 #include "phone_audio.h"
 #include "phone_storage.h"
+#include "phone_monitor.h"
+#include "esp_flash.h"
+#include "esp_psram.h"
 #include "phone_lock.h"
 #include "phone_app_settings.hpp"
 
@@ -77,7 +80,7 @@ lv_obj_t *s_wifi_body;
 lv_obj_t *s_wifi_list_cap;
 lv_obj_t *s_pass_title;
 lv_obj_t *s_pass_ta;
-lv_obj_t *s_about_vals[4];
+lv_obj_t *s_about_vals[5];
 lv_obj_t *s_c5_ver_val;
 lv_obj_t *s_sd_val;
 lv_obj_t *s_to_check[8];
@@ -381,6 +384,8 @@ lv_obj_t *grouped_row(lv_obj_t *card, const char *text, lv_event_cb_t cb, void *
 
 const char kIconInfo[] = "@info";
 const char kIconGlobe[] = "@globe";
+const char kIconBug[] = "@bug";
+const char kIconChart[] = "@chart";
 
 lv_obj_t *glyph_part(lv_obj_t *parent, int x, int y, int w, int h, int radius, int border, bool fill)
 {
@@ -414,9 +419,32 @@ void draw_globe_glyph(lv_obj_t *tile)
     glyph_part(tile, 7, 21, 30, 2, 0, 0, true);
 }
 
-void group_row(lv_obj_t *card, const char *symbol, uint32_t tile_color, const char *text, const char *value, int page)
+/* A bug: head, body with a split down the back, three legs a side, two antennae */
+void draw_bug_glyph(lv_obj_t *tile, uint32_t tile_color)
 {
-    lv_obj_t *row = grouped_row(card, text, on_open_page, reinterpret_cast<void *>(static_cast<intptr_t>(page)));
+    glyph_part(tile, 17, 9, 10, 8, LV_RADIUS_CIRCLE, 0, true);          // head
+    glyph_part(tile, 14, 15, 16, 21, LV_RADIUS_CIRCLE, 0, true);        // body
+    lv_obj_t *split = glyph_part(tile, 21, 18, 2, 16, 0, 0, true);
+    lv_obj_set_style_bg_color(split, lv_color_hex(tile_color), 0);
+    for (int y : {18, 24, 30}) {
+        glyph_part(tile, 8, y, 7, 2, 1, 0, true);
+        glyph_part(tile, 29, y, 7, 2, 1, 0, true);
+    }
+    glyph_part(tile, 15, 5, 2, 6, 1, 0, true);                          // antennae
+    glyph_part(tile, 27, 5, 2, 6, 1, 0, true);
+}
+
+/* Three bars of a chart, for the system monitor */
+void draw_chart_glyph(lv_obj_t *tile)
+{
+    glyph_part(tile, 9, 24, 7, 12, 2, 0, true);
+    glyph_part(tile, 18, 12, 7, 24, 2, 0, true);
+    glyph_part(tile, 28, 19, 7, 17, 2, 0, true);
+}
+
+/* Moves the label of a grouped row next to a colored icon tile on the left */
+void add_tile(lv_obj_t *row, const char *symbol, uint32_t tile_color)
+{
     lv_obj_t *label = lv_obj_get_child(row, 0);
     lv_obj_t *left = lv_obj_create(row);
     lv_obj_remove_style_all(left);
@@ -437,6 +465,10 @@ void group_row(lv_obj_t *card, const char *symbol, uint32_t tile_color, const ch
         draw_info_glyph(tile);
     } else if (strcmp(symbol, kIconGlobe) == 0) {
         draw_globe_glyph(tile);
+    } else if (strcmp(symbol, kIconBug) == 0) {
+        draw_bug_glyph(tile, tile_color);
+    } else if (strcmp(symbol, kIconChart) == 0) {
+        draw_chart_glyph(tile);
     } else {
         lv_obj_t *ic = lv_label_create(tile);
         lv_label_set_text(ic, symbol);
@@ -444,6 +476,13 @@ void group_row(lv_obj_t *card, const char *symbol, uint32_t tile_color, const ch
         lv_obj_center(ic);
     }
     lv_obj_move_to_index(tile, 0);
+    lv_obj_move_to_index(left, 0);
+}
+
+void group_row(lv_obj_t *card, const char *symbol, uint32_t tile_color, const char *text, const char *value, int page)
+{
+    lv_obj_t *row = grouped_row(card, text, on_open_page, reinterpret_cast<void *>(static_cast<intptr_t>(page)));
+    add_tile(row, symbol, tile_color);
     lv_obj_t *r = lv_label_create(row);
     lv_label_set_text_fmt(r, "%s  " LV_SYMBOL_RIGHT, value ? value : "");
     lv_obj_set_style_text_color(r, lv_color_hex(COLOR_SUB), 0);
@@ -993,12 +1032,20 @@ void refresh_about()
     char buf[32];
     snprintf(buf, sizeof(buf), "P4 rev v%d.%d", chip.revision / 100, chip.revision % 100);
     lv_label_set_text(s_about_vals[0], buf);
-    snprintf(buf, sizeof(buf), "%u KB", static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024));
-    lv_label_set_text(s_about_vals[1], buf);
-    snprintf(buf, sizeof(buf), "%u KB", static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+    /* Hardware sizes; the free and usable amounts are in the system monitor (Debug).
+     * ESP-IDF has no call for the physical SRAM: 768 KB HP L2MEM of the ESP32-P4 datasheet */
+    lv_label_set_text(s_about_vals[1], "768 KB");
+    snprintf(buf, sizeof(buf), "%u MB", static_cast<unsigned>(esp_psram_get_size() / (1024 * 1024)));
     lv_label_set_text(s_about_vals[2], buf);
-    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    uint32_t flash = 0;
+    if (esp_flash_get_size(nullptr, &flash) == ESP_OK) {
+        snprintf(buf, sizeof(buf), "%u MB", static_cast<unsigned>(flash / (1024 * 1024)));
+    } else {
+        strlcpy(buf, "--", sizeof(buf));
+    }
     lv_label_set_text(s_about_vals[3], buf);
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    lv_label_set_text(s_about_vals[4], buf);
     if (!phone_net_c5_version(buf, sizeof(buf))) {
         strlcpy(buf, "--", sizeof(buf));
     }
@@ -1228,6 +1275,13 @@ void build_ui()
     group_row(g, kIconInfo, 0x6B7785, T("Giới thiệu", "About"), nullptr, PAGE_ABOUT);
     group_end(g);
 
+    g = make_group(main_page, T("Gỡ lỗi", "Debug"));
+    lv_obj_t *mon = switch_row(g, T("Thông số hệ thống", "System monitor"), phone_monitor_is_on(), [](lv_event_t *e) {
+        phone_monitor_set(lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED));
+    });
+    add_tile(lv_obj_get_parent(mon), kIconChart, 0x27AE60);
+    group_end(g);
+
     lv_obj_t *wifi = make_page(root, "Wi-Fi", PAGE_WIFI);
     lv_obj_t *sw_card = make_card(wifi);
     s_wifi_sw = switch_row(sw_card, "Wi-Fi", s_wifi_on, on_wifi_toggle);
@@ -1381,8 +1435,8 @@ void build_ui()
     make_text(about, "KSDIY ESP32-P4C5", COLOR_TEXT);
     make_text(about, "ESP32-P4 + ESP32-C5 · 480×800", COLOR_SUB);
     lv_obj_t *dev = make_group(about, T("Thiết bị", "Device"));
-    const char *keys[4] = {"Chip", T("RAM trống", "Free RAM"), T("PSRAM trống", "Free PSRAM"), "MAC"};
-    for (int i = 0; i < 4; i++) {
+    const char *keys[5] = {"Chip", "RAM", "PSRAM", "Flash", "MAC"};
+    for (int i = 0; i < 5; i++) {
         s_about_vals[i] = kv_row(dev, keys[i]);
     }
     group_end(dev);

@@ -11,7 +11,8 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
   - Sound: volume and mute.
   - Language, time zone (SNTP once Wi-Fi is up).
   - Power: power off and restart.
-  - About: device, software versions (app, ESP-IDF, ESP32-C5 firmware, ESP-Hosted, LVGL, Brookesia), detected hardware, microSD size, battery and charger.
+  - About: device (chip, RAM, PSRAM and flash size, MAC), software versions (app, ESP-IDF, ESP32-C5 firmware, ESP-Hosted, LVGL, Brookesia), detected hardware, microSD size, battery and charger.
+  - Debug: system monitor, a small box over every screen with the load of both CPU cores, the frames drawn per second, the free / usable internal SRAM (with the lowest and the largest block), the DMA-capable RAM and the PSRAM; the same figures go to the log (tag `MON`) every 5 s.
 - **Level app**: two-axis spirit level on the IMU accelerometer. The bubble floats toward the higher side and turns green within 0.5° on both axes; Calibrate stores the current position as zero.
 - **Camera app**: live preview of the CSI sensor (cropped, scaled and rotated by the PPA) and photos saved as JPEG (hardware encoder) in `/sdcard/DCIM`. The sensor is powered down when the app is in the background.
 - **Gallery app**: the photos of `/sdcard/DCIM` as a grid of thumbnails, newest first, with a viewer (previous / next by buttons or swipe) and delete. Photos are decoded by the hardware JPEG decoder and scaled by the PPA.
