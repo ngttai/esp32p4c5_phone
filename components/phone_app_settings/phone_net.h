@@ -28,6 +28,8 @@ void phone_net_connect(const char *ssid, const char *pass);
 void phone_net_disconnect(void);
 /** User turns Wi-Fi on: reconnect through the saved list and resume auto reconnect. */
 void phone_net_enable(void);
+/** Wi-Fi on for the user: true until phone_net_disconnect(), again after phone_net_enable(). */
+bool phone_net_is_enabled(void);
 /** Number of saved networks (0..5). */
 int phone_net_saved_count(void);
 /** Copy the saved SSID at index (0 = most recent) into out; returns false when index is out of range. */

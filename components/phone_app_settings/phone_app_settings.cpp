@@ -86,12 +86,14 @@ lv_obj_t *s_sd_val;
 lv_obj_t *s_to_check[8];
 lv_obj_t *s_batt_vals[6];
 lv_obj_t *s_bri_val;
+lv_obj_t *s_bri_slider;
 lv_obj_t *s_vol_val;
 lv_obj_t *s_vol_slider;
 lv_obj_t *s_mute_sw;
 bool s_muted;
 lv_obj_t *s_wifi_sw;
 bool s_wifi_on = true;
+bool s_open_wifi;          // show the Wi-Fi page on the next run or resume
 lv_obj_t *s_kb;
 
 bool s_wifi_inited;
@@ -1146,6 +1148,13 @@ void on_timer(lv_timer_t *t)
         refresh_saved();
     } else if (s_cur_page == PAGE_SOUND) {
         sync_sound_page();
+    } else if (s_cur_page == PAGE_DISPLAY && !lv_obj_has_state(s_bri_slider, LV_STATE_PRESSED)) {
+        /* follow quick settings */
+        const int bri = phone_pref_get("bri", 100);
+        if (lv_slider_get_value(s_bri_slider) != bri) {
+            lv_slider_set_value(s_bri_slider, bri, LV_ANIM_OFF);
+            lv_label_set_text_fmt(s_bri_val, "%d%%", bri);
+        }
     } else if (s_cur_page == PAGE_ABOUT) {
         static int tick;
         if ((++tick % 4) == 0) {
@@ -1243,6 +1252,7 @@ void build_ui()
     memset(s_tz_check, 0, sizeof(s_tz_check));
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
+    s_wifi_on = phone_net_is_enabled();     /* also switched from quick settings */
     s_saved_sig[0] = '\0';   /* the saved list is rebuilt from scratch with the new widgets */
 
     lv_obj_t *scr = lv_screen_active();
@@ -1392,7 +1402,7 @@ void build_ui()
     lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
     s_kb = kb;
 
-    build_slider_card(root, T("Màn hình", "Display"), T("Độ sáng", "Brightness"), PAGE_DISPLAY, 5,
+    s_bri_slider = build_slider_card(root, T("Màn hình", "Display"), T("Độ sáng", "Brightness"), PAGE_DISPLAY, 5,
                       phone_pref_get("bri", 100), on_brightness, on_brightness_done, &s_bri_val);
     lv_obj_t *to = make_group(s_pages[PAGE_DISPLAY], T("Tự tắt màn hình", "Screen timeout"));
     for (int i = 0; i < phone_lock_timeout_count(); i++) {
@@ -1514,6 +1524,19 @@ bool PhoneSettings::run()
 {
     build_ui();
     lv_timer_create(on_timer, 500, nullptr);
+    if (s_open_wifi) {
+        s_open_wifi = false;
+        show_page(PAGE_WIFI);
+    }
+    return true;
+}
+
+bool PhoneSettings::resume()
+{
+    if (s_open_wifi) {
+        s_open_wifi = false;
+        show_page(PAGE_WIFI);
+    }
     return true;
 }
 
@@ -1528,6 +1551,15 @@ bool PhoneSettings::back()
     }
     return true;
 }
+
+} // namespace esp_brookesia::apps
+
+void phone_settings_open_wifi_next(void)
+{
+    s_open_wifi = true;
+}
+
+namespace esp_brookesia::apps {
 
 ESP_UTILS_REGISTER_PLUGIN_WITH_CONSTRUCTOR(systems::base::App, PhoneSettings, APP_NAME, []()
 {

@@ -51,6 +51,7 @@ std::atomic<bool> s_ready{false};
 char s_c5_ver[16];                // written once before s_c5_ver_ok is set
 std::atomic<bool> s_c5_ver_ok{false};
 std::atomic<bool> s_auto{false};
+std::atomic<bool> s_enabled{true};    // Wi-Fi on for the user (Settings switch, quick settings tile)
 char s_pend_ssid[33] = {};       // user-entered credentials, saved only after GOT_IP
 char s_pend_pass[65] = {};
 std::atomic<bool> s_user_op{false};
@@ -359,8 +360,14 @@ extern "C" bool phone_net_c5_version(char *out, size_t len)
     return true;
 }
 
+extern "C" bool phone_net_is_enabled(void)
+{
+    return s_enabled;
+}
+
 extern "C" void phone_net_disconnect(void)
 {
+    s_enabled = false;
     s_user_op = true;
     s_auto = false;
     esp_timer_stop(s_retry);
@@ -369,6 +376,7 @@ extern "C" void phone_net_disconnect(void)
 
 extern "C" void phone_net_enable(void)
 {
+    s_enabled = true;
     if (!s_ready) {
         return;
     }
