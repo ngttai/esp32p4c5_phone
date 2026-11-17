@@ -20,6 +20,10 @@
 #include "tinyusb_msc.h"
 #include "esp_blockdev.h"
 #include "sdmmc_cmd.h"
+#include "sd_protocol_defs.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
+#include "esp_memory_utils.h"
 #include "bsp/esp-bsp.h"
 #include "lvgl.h"
 #include "esp_brookesia.hpp"
@@ -86,17 +90,22 @@ uint32_t s_delete_armed_until;
 uint32_t s_usb_msg_until;
 
 bool s_usb_on;
-/* The card as a block device for the USB drive. Writes go one sector at a time (single block
- * write, as MetalioClaw4 does with a 512-byte MSC buffer): the stop command that ends a multiple
+/* The card as a block device for the USB drive. The stop command (CMD12) that ends a multiple
  * block write breaks during long write bursts on this board, whose SDMMC host also runs the SDIO
- * link of the Wi-Fi chip, and leaves the card in the receive state. Reads stay multiple block.
+ * link of the Wi-Fi chip, and leaves the card in the receive state. So writes are multiple block
+ * with SET_BLOCK_COUNT (CMD23) and no CMD12 when the card supports it (local esp_driver_sdmmc,
+ * flag SCF_NO_AUTO_STOP), one sector at a time otherwise (as MetalioClaw4). Reads stay as they are.
  * A failed transfer re-initializes the card and is tried again: the writes of the PC are already
  * acknowledged when they reach the card, so they must not be dropped. */
 struct UsbDisk {
     esp_blockdev_t dev;
     sdmmc_card_t *card;
     uint32_t recoveries;
+    bool cmd23;             // the card takes SET_BLOCK_COUNT
+    uint8_t *bounce;        // DMA-aligned copy for a source buffer the SDMMC DMA cannot take
 };
+constexpr size_t DISK_BOUNCE = CONFIG_TINYUSB_MSC_BUFSIZE;
+constexpr size_t DMA_ALIGN = 64;
 UsbDisk s_disk;
 bool s_msc_driver;
 tinyusb_msc_storage_handle_t s_msc_storage;
@@ -340,6 +349,108 @@ bool disk_recover(UsbDisk *d)
     return false;
 }
 
+constexpr int SCF_NO_AUTO_STOP = 0x4000;       // same value as components/esp_driver_sdmmc
+
+esp_err_t card_cmd(sdmmc_card_t *card, sdmmc_command_t *cmd)
+{
+    if (cmd->timeout_ms == 0) {
+        cmd->timeout_ms = 1000;     /* sdmmc_send_cmd() fills this in; do_transaction() does not */
+    }
+    esp_err_t err = card->host.do_transaction(card->host.slot, cmd);
+    return err != ESP_OK ? err : cmd->error;
+}
+
+/* SCR bit 33: CMD23 supported */
+bool card_has_cmd23(sdmmc_card_t *card)
+{
+    auto *scr = static_cast<uint8_t *>(heap_caps_aligned_calloc(64, 1, 64, MALLOC_CAP_DMA));
+    if (!scr) {
+        return false;
+    }
+    sdmmc_command_t app = {};
+    app.opcode = MMC_APP_CMD;
+    app.arg = MMC_ARG_RCA(card->rca);
+    app.flags = SCF_CMD_AC | SCF_RSP_R1;
+    sdmmc_command_t cmd = {};
+    cmd.opcode = SD_APP_SEND_SCR;
+    cmd.flags = SCF_CMD_ADTC | SCF_CMD_READ | SCF_RSP_R1;
+    cmd.data = scr;
+    cmd.datalen = 8;
+    cmd.buflen = 64;
+    cmd.blklen = 8;
+    cmd.timeout_ms = 1000;
+    bool ok = card_cmd(card, &app) == ESP_OK && card_cmd(card, &cmd) == ESP_OK;
+    const bool cmd23 = ok && (scr[3] & 0x02);
+    ESP_LOGI(TAG, "SCR %02x %02x %02x %02x: CMD23 %s", scr[0], scr[1], scr[2], scr[3],
+             !ok ? "unknown" : cmd23 ? "yes" : "no");
+    heap_caps_free(scr);
+    return cmd23;
+}
+
+/* Waits until the card has programmed the data and is back in the transfer state */
+esp_err_t card_wait_ready(sdmmc_card_t *card)
+{
+    const int64_t t0 = esp_timer_get_time();
+    for (;;) {
+        sdmmc_command_t st = {};
+        st.opcode = MMC_SEND_STATUS;
+        st.arg = MMC_ARG_RCA(card->rca);
+        st.flags = SCF_CMD_AC | SCF_RSP_R1;
+        esp_err_t err = card_cmd(card, &st);
+        if (err != ESP_OK) {
+            return err;
+        }
+        const uint32_t r1 = MMC_R1(st.response);
+        if ((r1 & MMC_R1_READY_FOR_DATA) && MMC_R1_CURRENT_STATE_STATUS(r1) == MMC_R1_CURRENT_STATE_TRAN) {
+            return ESP_OK;
+        }
+        if (esp_timer_get_time() - t0 > 2000 * 1000) {
+            ESP_LOGE(TAG, "card busy, status 0x%08lx", static_cast<unsigned long>(r1));
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+}
+
+/* SET_BLOCK_COUNT then WRITE_MULTIPLE_BLOCK without the automatic CMD12 */
+esp_err_t card_write_counted(UsbDisk *d, const uint8_t *src, size_t sector, size_t count)
+{
+    sdmmc_card_t *card = d->card;
+    const size_t ss = card->csd.sector_size;
+    /* the driver refuses (and does not send) a data command with a buffer the DMA cannot use:
+     * that must be known before CMD23, or the card waits for blocks that never come */
+    if (reinterpret_cast<uintptr_t>(src) % DMA_ALIGN || !esp_ptr_dma_capable(src)) {
+        if (!d->bounce || count * ss > DISK_BOUNCE) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        memcpy(d->bounce, src, count * ss);
+        src = d->bounce;
+    }
+    sdmmc_command_t setc = {};
+    setc.opcode = MMC_SET_BLOCK_COUNT;
+    setc.arg = count;
+    setc.flags = SCF_CMD_AC | SCF_RSP_R1;
+    esp_err_t err = card_cmd(card, &setc);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "CMD23: %s", esp_err_to_name(err));
+        return err;
+    }
+    sdmmc_command_t wr = {};
+    wr.opcode = MMC_WRITE_BLOCK_MULTIPLE;
+    wr.arg = (card->ocr & SD_OCR_SDHC_CAP) ? sector : sector * ss;
+    wr.flags = SCF_CMD_ADTC | SCF_RSP_R1 | SCF_NO_AUTO_STOP;
+    wr.data = const_cast<uint8_t *>(src);
+    wr.datalen = count * ss;
+    wr.buflen = count * ss;
+    wr.blklen = ss;
+    wr.timeout_ms = 5000;
+    err = card_cmd(card, &wr);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "CMD25: %s", esp_err_to_name(err));
+        return err;
+    }
+    return card_wait_ready(card);
+}
+
 esp_err_t disk_read(esp_blockdev_handle_t h, uint8_t *dst, size_t, uint64_t addr, size_t len)
 {
     auto *d = static_cast<UsbDisk *>(h->ctx);
@@ -359,9 +470,11 @@ esp_err_t disk_write(esp_blockdev_handle_t h, const uint8_t *src, uint64_t addr,
     auto *d = static_cast<UsbDisk *>(h->ctx);
     const size_t ss = d->card->csd.sector_size;
     esp_err_t err = ESP_FAIL;
-    for (size_t off = 0; off < len; off += ss) {
+    const size_t step = d->cmd23 ? len : ss;
+    for (size_t off = 0; off < len; off += step) {
         for (int i = 0; i < DISK_TRIES; i++) {
-            err = sdmmc_write_sectors(d->card, src + off, (addr + off) / ss, 1);
+            err = d->cmd23 ? card_write_counted(d, src + off, (addr + off) / ss, step / ss)
+                  : sdmmc_write_sectors(d->card, src + off, (addr + off) / ss, 1);
             if (err == ESP_OK || !disk_recover(d)) {
                 break;
             }
@@ -425,6 +538,8 @@ void usb_stop()
     if (s_usb) {
         lv_obj_add_flag(s_usb, LV_OBJ_FLAG_HIDDEN);
     }
+    heap_caps_free(s_disk.bounce);
+    s_disk.bounce = nullptr;
     ESP_LOGI(TAG, "USB drive off (card re-initialized %u times)", static_cast<unsigned>(s_disk.recoveries));
 }
 
@@ -455,6 +570,11 @@ bool usb_start()
         s_msc_driver = true;
         s_disk = {};
         s_disk.card = card;
+        s_disk.cmd23 = card_has_cmd23(card);
+        s_disk.bounce = static_cast<uint8_t *>(heap_caps_aligned_alloc(DMA_ALIGN, DISK_BOUNCE, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
+        if (!s_disk.bounce) {
+            s_disk.cmd23 = false;       /* one sector at a time through the driver's own copy */
+        }
         s_disk.dev.ctx = &s_disk;
         s_disk.dev.ops = &DISK_OPS;
         const size_t ss = card->csd.sector_size;

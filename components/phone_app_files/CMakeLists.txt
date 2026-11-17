@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS phone_app_files.cpp phone_files_icon.c
     INCLUDE_DIRS .
-    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings
+    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings esp_timer
     WHOLE_ARCHIVE
 )
 
