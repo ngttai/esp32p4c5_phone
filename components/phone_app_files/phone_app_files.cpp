@@ -390,6 +390,12 @@ const esp_blockdev_ops_t DISK_OPS = {
     .release = disk_nop,
 };
 
+void scsi_field(uint8_t *dst, size_t len, const char *text)
+{
+    memset(dst, ' ', len);      /* SCSI inquiry strings are padded with spaces */
+    memcpy(dst, text, std::min(len, strlen(text)));
+}
+
 void show_usb_msg(const char *text)
 {
     lv_label_set_text(s_usb_msg, text);
@@ -907,6 +913,16 @@ void build_ui()
 }
 
 } // namespace
+
+/* Name of the drive on the PC (SCSI inquiry); TinyUSB calls this before its v1 callback, which
+ * esp_tinyusb fills with "TinyUSB TEST MSC Storage" */
+extern "C" uint32_t tud_msc_inquiry2_cb(uint8_t, scsi_inquiry_resp_t *resp, uint32_t)
+{
+    scsi_field(resp->vendor_id, sizeof(resp->vendor_id), "KSDIY");
+    scsi_field(resp->product_id, sizeof(resp->product_id), "P4C5 microSD");
+    scsi_field(resp->product_rev, sizeof(resp->product_rev), "1.0");
+    return sizeof(scsi_inquiry_resp_t);
+}
 
 namespace esp_brookesia::apps {
 
