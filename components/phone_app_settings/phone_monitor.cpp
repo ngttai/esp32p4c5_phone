@@ -1,5 +1,8 @@
 #include "phone_monitor.h"
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -11,7 +14,7 @@
 
 namespace {
 
-const char *TAG = "MON";
+const char *TAG = "SYSMON";
 constexpr uint32_t PERIOD_MS = 1000;
 constexpr int LOG_EVERY = 5;            // periods
 
@@ -26,6 +29,59 @@ int s_ticks;
 void on_render(lv_event_t *)
 {
     s_frames++;
+}
+
+/* The three busiest tasks since the last call (run time, microseconds), for the log */
+constexpr int MAX_TASKS = 48;
+struct TaskRun {
+    TaskHandle_t handle;
+    uint32_t runtime;
+};
+TaskRun s_prev_runs[MAX_TASKS];
+int s_prev_count;
+int64_t s_prev_top_us;
+
+void top_tasks(char *out, size_t len)
+{
+    out[0] = '\0';
+    auto *st = static_cast<TaskStatus_t *>(malloc(sizeof(TaskStatus_t) * MAX_TASKS));
+    if (!st) {
+        return;
+    }
+    const int n = static_cast<int>(uxTaskGetSystemState(st, MAX_TASKS, nullptr));
+    const int64_t now = esp_timer_get_time();
+    const uint32_t elapsed = static_cast<uint32_t>(now - s_prev_top_us);
+    s_prev_top_us = now;
+    struct Use {
+        const char *name;
+        uint32_t d;
+    } use[MAX_TASKS];
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t prev = st[i].ulRunTimeCounter;
+        for (int k = 0; k < s_prev_count; k++) {
+            if (s_prev_runs[k].handle == st[i].xHandle) {
+                prev = s_prev_runs[k].runtime;
+                break;
+            }
+        }
+        if (strncmp(st[i].pcTaskName, "IDLE", 4) != 0) {
+            use[m++] = {st[i].pcTaskName, st[i].ulRunTimeCounter - prev};
+        }
+    }
+    std::sort(use, use + m, [](const Use & a, const Use & b) {
+        return a.d > b.d;
+    });
+    size_t pos = 0;
+    for (int i = 0; i < m && i < 3 && elapsed; i++) {
+        pos += snprintf(out + pos, len > pos ? len - pos : 0, " %s %u%%", use[i].name,
+                        static_cast<unsigned>(static_cast<uint64_t>(use[i].d) * 100 / elapsed));
+    }
+    s_prev_count = std::min(n, MAX_TASKS);
+    for (int i = 0; i < s_prev_count; i++) {
+        s_prev_runs[i] = {st[i].xHandle, st[i].ulRunTimeCounter};
+    }
+    free(st);
 }
 
 /* Load of each core over the last period, from the run time of its idle task (microseconds) */
@@ -78,11 +134,13 @@ void update(lv_timer_t *)
 
     if (++s_ticks >= LOG_EVERY) {
         s_ticks = 0;
-        ESP_LOGI(TAG, "cpu %d%% %d%% fps %u | sram %uK min %uK max %uK | dma %uK max %uK | psram %uK max %uK",
+        char top[96];
+        top_tasks(top, sizeof(top));
+        ESP_LOGI(TAG, "cpu %d%% %d%% fps %u | sram %uK min %uK max %uK | dma %uK max %uK | psram %uK max %uK | top%s",
                  load[0], configNUMBER_OF_CORES > 1 ? load[1] : 0, static_cast<unsigned>(fps),
                  static_cast<unsigned>(sram), static_cast<unsigned>(sram_min), static_cast<unsigned>(sram_big),
                  static_cast<unsigned>(dma), static_cast<unsigned>(dma_big),
-                 static_cast<unsigned>(psram), static_cast<unsigned>(psram_big));
+                 static_cast<unsigned>(psram), static_cast<unsigned>(psram_big), top);
     }
 }
 
@@ -109,6 +167,8 @@ void show()
     s_frames = 0;
     s_ticks = 0;
     s_last_us = esp_timer_get_time();
+    s_prev_count = 0;
+    s_prev_top_us = s_last_us;
     for (int c = 0; c < configNUMBER_OF_CORES; c++) {
         s_last_idle[c] = ulTaskGetIdleRunTimeCounterForCore(c);
     }
