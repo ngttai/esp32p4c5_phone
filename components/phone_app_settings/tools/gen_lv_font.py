@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Convert a TTF to an LVGL font C file (4 bpp, no kerning), with PIL only.
 
-Usage: gen_lv_font.py FONT.ttf SIZE_PX NAME OUT.c
+Usage: gen_lv_font.py FONT.ttf SIZE_PX NAME OUT.c [CHARS]
+CHARS limits the font to those characters (a large font for a few words).
 """
 import sys
 from PIL import Image, ImageDraw, ImageFont
@@ -10,6 +11,8 @@ RANGES = [(0x20, 0x7E), (0xA0, 0x17F), (0x1A0, 0x1B0), (0x1EA0, 0x1EF9),
           (0x2013, 0x2014), (0x2018, 0x201D), (0x2026, 0x2026)]
 
 ttf, size, name, out = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+if len(sys.argv) > 5:
+    RANGES = [(cp, cp) for cp in sorted({ord(c) for c in sys.argv[5] + " "})]
 font = ImageFont.truetype(ttf, size)
 ascent, descent = font.getmetrics()
 notdef = bytes(font.getmask("￿", mode="L"))
@@ -119,7 +122,7 @@ const lv_font_t {name} = {{
     .underline_position = {-max(1, round(size * 0.12))},
     .underline_thickness = {max(1, round(size / 14))},
     .dsc = &font_dsc,
-    .fallback = &lv_font_montserrat_{size},     /* LVGL symbols (LV_SYMBOL_*) */
+    .fallback = {"NULL," if len(sys.argv) > 5 else f"&lv_font_montserrat_{size},     /* LVGL symbols (LV_SYMBOL_*) */"}
     .user_data = NULL,
 }};
 """)

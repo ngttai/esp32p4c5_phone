@@ -5,8 +5,9 @@ extern "C" {
 #endif
 
 /**
- * Boot splash: the animated logo (splash.bin, QOI frames at 15 fps, see tools/make_splash.py) over
- * every screen. Call with the LVGL lock held, right after the display starts.
+ * Boot splash over every screen, chosen by Kconfig PHONE_BOOT_SPLASH: the animated logo (splash.bin,
+ * QOI frames at 15 fps, see tools/make_splash.py, splash_logo.cpp), a hand-drawn line and a greeting
+ * (splash_simple.cpp) or none. Call with the LVGL lock held, right after the display starts.
  */
 void phone_boot_splash_show(void);
 
