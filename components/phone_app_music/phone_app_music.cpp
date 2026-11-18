@@ -250,7 +250,8 @@ done:
 
 /* ---- player ---- */
 
-TaskHandle_t s_task;
+std::atomic<TaskHandle_t> s_task;
+std::atomic<bool> s_quit;               // the player task ends (the app is closed)
 std::atomic<int> s_req{-1};             // track to start
 std::atomic<bool> s_stop;
 std::atomic<bool> s_paused;
@@ -417,10 +418,18 @@ done:
 
 void player_task(void *)
 {
-    esp_audio_dec_register_default();
-    esp_audio_simple_dec_register_default();
+    static bool s_registered;
+    if (!s_registered) {
+        esp_audio_dec_register_default();
+        esp_audio_simple_dec_register_default();
+        s_registered = true;
+    }
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(200));
+        if (s_quit) {
+            s_task = nullptr;
+            vTaskDelete(nullptr);
+        }
         int idx = s_req.exchange(-1);
         std::string path;
         while (idx >= 0 && !s_stop && s_lib && s_lib->path(idx, path)) {
@@ -461,9 +470,13 @@ void play_track(int idx)
     if (!s_lib || idx < 0 || idx >= static_cast<int>(s_lib->count())) {
         return;
     }
-    if (!s_task && xTaskCreate(player_task, "phone_music", 8192, nullptr, 5, &s_task) != pdPASS) {
-        s_task = nullptr;
-        return;
+    s_quit = false;
+    if (!s_task) {
+        TaskHandle_t task = nullptr;
+        if (xTaskCreate(player_task, "phone_music", 8192, nullptr, 5, &task) != pdPASS) {
+            return;
+        }
+        s_task = task;
     }
     s_stop = false;
     s_req = idx;
@@ -480,6 +493,20 @@ void stop_playback()
         s_stop = true;
     }
     for (int i = 0; i < 100 && s_playing; i++) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+/* Closing the app ends the player task: its 8 KB stack is internal RAM */
+void end_player()
+{
+    stop_playback();
+    if (!s_task || s_playing) {
+        return;                             /* still playing after 2 s: left running */
+    }
+    s_quit = true;
+    xTaskNotifyGive(s_task);
+    for (int i = 0; i < 50 && s_task; i++) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -1078,7 +1105,7 @@ bool PhoneMusic::back()
 /* Leaving to the home screen keeps the music playing; closing the app stops it */
 bool PhoneMusic::close()
 {
-    stop_playback();
+    end_player();
     retire_library();
     phone_storage_release(s_hold_name);
     /* the image still points at a cover buffer until the core deletes the screen */
