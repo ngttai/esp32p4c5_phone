@@ -291,6 +291,12 @@ bool interrupted()
     return s_stop || s_req >= 0;
 }
 
+void register_decoders()
+{
+    esp_audio_dec_register_default();
+    esp_audio_simple_dec_register_default();
+}
+
 /* Play one file to its end; returns false when it could not be played */
 bool play_file(const std::string &path)
 {
@@ -315,7 +321,15 @@ bool play_file(const std::string &path)
         fseek(file, 0, SEEK_SET);
     }
 
-    if (!in || !pcm || !file || size <= 0 || !spk || esp_audio_simple_dec_open(&cfg, &dec) != ESP_AUDIO_ERR_OK) {
+    if (in && pcm && file && size > 0 && spk && esp_audio_simple_dec_open(&cfg, &dec) != ESP_AUDIO_ERR_OK) {
+        /* The GMF player of the Radio app unregisters the default decoders when it is destroyed (its
+         * own reference count): register them again */
+        register_decoders();
+        if (esp_audio_simple_dec_open(&cfg, &dec) != ESP_AUDIO_ERR_OK) {
+            dec = nullptr;
+        }
+    }
+    if (!in || !pcm || !file || size <= 0 || !spk || !dec) {
         ESP_LOGE(TAG, "cannot start %s", path.c_str());
         goto done;
     }
@@ -420,8 +434,7 @@ void player_task(void *)
 {
     static bool s_registered;
     if (!s_registered) {
-        esp_audio_dec_register_default();
-        esp_audio_simple_dec_register_default();
+        register_decoders();
         s_registered = true;
     }
     for (;;) {

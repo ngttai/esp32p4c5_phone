@@ -4,7 +4,7 @@
 
 Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 panel, ST7102 over MIPI DSI, ST7123 touch), with a settings app and the system behavior of a small phone:
 
-- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Video, Files, Second screen, USB camera, AI Assistant, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
+- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Radio, Video, Files, Second screen, USB camera, AI Assistant, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
 - **Settings app** (Vietnamese / English):
   - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect, forget.
   - Display: brightness, screen timeout.
@@ -20,6 +20,7 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
 - **Gallery app**: the photos of `/sdcard/DCIM` as a grid of thumbnails, newest first, with a viewer (previous / next by buttons or swipe) and delete. Photos are decoded by the hardware JPEG decoder and scaled by the PPA.
 - **Weather app**: current conditions and a 7-day forecast from [open-meteo.com](https://open-meteo.com) (HTTPS, no key) for a city picked from a list. Needs Wi-Fi with Internet access.
 - **Music app**: plays the MP3, WAV, FLAC, AAC, M4A and OGG files of the card (up to three folder levels deep) on the speaker (mono), with play / pause, previous, next, repeat (off, list, one track) and auto-advance. MP3 files show the title, artist and duration of their ID3 tag, read in the background, and the JPEG cover of the tag (baseline JPEG only; a colored placeholder otherwise). It keeps playing in the background and with the screen off, and follows the phone volume.
+- **Radio app**: HLS internet radio (`.m3u8`; AAC, MP3 or MPEG-TS segments) through the GMF simple player, as in MetalioClaw4: station name, status, stream format, a 12-band spectrum (`gmf_fft`), previous / play-stop / next, volume, and the station list. The stations are **only** in `/sdcard/radio/stations.json` on the card, there is no list in the firmware: `{"stations": [{"name": "VOV1", "url": "https://.../playlist.m3u8"}, ...]}` (or a bare array), up to 100 stations and 64 KB; entries without a name or an http(s) URL are skipped. A sample with 13 Vietnamese stations is in `sdcard/radio/stations.json`: copy it to the card (USB drive of the Files app). Without the file the app says why and offers Retry; it never writes to the card. The last station is remembered and plays when the app opens; leaving the app (home or close) stops the sound. Played at the rate of the stream, mixed to mono. The HLS `.aac` segments start with an ID3 tag that the GMF decoder takes for MP3: `patches/gmf_audio-hls-aac.patch` (from MetalioClaw4) is applied to `managed_components/espressif__gmf_audio` by `CMakeLists.txt` at every configure.
 - **Video app**: plays Motion JPEG `.avi` files with 16-bit PCM sound from the card (hardware JPEG decoder, PPA scaling). Landscape videos are turned to fill the portrait screen. The ESP32-P4 has no H.264 decoder, so other videos must be converted first:
 
   ```
@@ -83,6 +84,7 @@ Settings are stored in NVS (namespace `phone`).
 - `components/phone_app_gallery/`: the Gallery app.
 - `components/phone_app_weather/`: the Weather app.
 - `components/phone_app_music/`: the Music app (decoders from `espressif/esp_audio_codec`, fetched by the component manager). `music/` holds the ID3 parser, track library and background metadata service, adapted from the author's esp_chatbot_v1 project.
+- `components/phone_app_radio/`: the Radio app. `radio_player.cpp` (GMF simple player, HLS reader, HTTPS with the certificate bundle, spectrum) is ported from MetalioClaw4; `radio_stations.cpp` reads the JSON list. Versions pinned in its `idf_component.yml` keep `esp_audio_codec` 2.6 and `esp_codec_dev` 1.5 of the other apps (`gmf_io` 1.0.1 and later want `esp_codec_dev` 2.0 beta).
 - `components/phone_app_video/`: the Video app.
 - `components/phone_app_files/`: the Files app.
 - `components/phone_app_assistant/`: the AI Assistant app. `assistant_chat.cpp` is the voice session (Opus from `espressif/esp_audio_codec`), `assistant_emote.cpp` the animated face; `eaf/` holds the EAF animation decoder of `espressif2022/esp_emote_gfx` (Apache-2.0) and `emote/` the eye animations (Espressif Emote Pack, license not confirmed, see the README there).
