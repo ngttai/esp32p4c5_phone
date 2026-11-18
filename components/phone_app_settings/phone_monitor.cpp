@@ -178,6 +178,7 @@ void show()
     lv_display_add_event_cb(lv_display_get_default(), on_render, LV_EVENT_RENDER_READY, nullptr);
     s_timer = lv_timer_create(update, PERIOD_MS, nullptr);
     ESP_LOGI(TAG, "on");
+    phone_memdump_report();
 }
 
 void hide()

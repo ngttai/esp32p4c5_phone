@@ -29,6 +29,7 @@
 #include "phone_audio.h"
 #include "phone_storage.h"
 #include "phone_monitor.h"
+#include "phone_speedtest.h"
 #include "esp_flash.h"
 #include "esp_psram.h"
 #include "phone_lock.h"
@@ -54,6 +55,7 @@ enum Page {
     PAGE_TZ,
     PAGE_POWER,
     PAGE_ABOUT,
+    PAGE_SPEED,
     PAGE_COUNT,
 };
 
@@ -1135,6 +1137,86 @@ void sync_sound_page()
     }
 }
 
+/* Network speed test page (Settings > Debug): Wi-Fi now, the 4G modem later */
+lv_obj_t *s_speed_check[2];
+lv_obj_t *s_speed_text;
+phone_speed_target_t s_speed_target = PHONE_SPEED_LAN;
+
+void speed_update_checks()
+{
+    for (int i = 0; i < 2; i++) {
+        if (s_speed_check[i]) {
+            lv_label_set_text(s_speed_check[i], i == s_speed_target ? LV_SYMBOL_OK : "");
+        }
+    }
+}
+
+void speed_refresh()
+{
+    if (!s_speed_text) {
+        return;
+    }
+    phone_speed_state_t st;
+    phone_speedtest_get(&st);
+    if (!st.running && !st.failed && st.ms == 0) {
+        lv_label_set_text(s_speed_text, T("Chọn máy chủ rồi bấm Tải xuống hoặc Tải lên (10 giây).\n"
+                                          "Máy tính: chạy tools/speed_server.py, cùng mạng với board.",
+                                          "Pick a server, then Download or Upload (10 s).\n"
+                                          "PC: run tools/speed_server.py on the board's network."));
+        return;
+    }
+    const char *dir = st.upload ? T("Tải lên", "Upload") : T("Tải xuống", "Download");
+    const char *state = st.running ? T("đang đo", "running") : st.failed ? T("lỗi", "failed") : T("xong", "done");
+    lv_label_set_text_fmt(s_speed_text,
+                          "%s %s: %s\n"
+                          "%u.%02u Mbps\n"
+                          "%u.%u MB / %u.%u s\n"
+                          "SRAM min %uK   DMA min %uK",
+                          dir, st.host, state,
+                          static_cast<unsigned>(st.kbps / 1000), static_cast<unsigned>(st.kbps % 1000 / 10),
+                          static_cast<unsigned>(st.bytes / 1000000), static_cast<unsigned>(st.bytes % 1000000 / 100000),
+                          static_cast<unsigned>(st.ms / 1000), static_cast<unsigned>(st.ms % 1000 / 100),
+                          static_cast<unsigned>(st.sram_min == UINT32_MAX ? 0 : st.sram_min / 1024),
+                          static_cast<unsigned>(st.dma_min == UINT32_MAX ? 0 : st.dma_min / 1024));
+}
+
+void on_speed_target(lv_event_t *e)
+{
+    s_speed_target = static_cast<phone_speed_target_t>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    speed_update_checks();
+}
+
+void on_speed_start(lv_event_t *e)
+{
+    const bool upload = lv_event_get_user_data(e) != nullptr;
+    phone_speedtest_start(s_speed_target, upload);
+    speed_refresh();
+}
+
+void build_speed_page(lv_obj_t *root)
+{
+    lv_obj_t *p = make_page(root, T("Tốc độ mạng", "Network speed"), PAGE_SPEED);
+    lv_obj_t *g = make_group(p, T("Máy chủ", "Server"));
+    const char *names[2] = {T("Máy tính (speed_server.py)", "PC (speed_server.py)"), "Internet (Cloudflare)"};
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *row = grouped_row(g, names[i], on_speed_target, reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        s_speed_check[i] = lv_label_create(row);
+        lv_obj_set_style_text_color(s_speed_check[i], lv_color_hex(COLOR_ACCENT), 0);
+    }
+    group_end(g);
+    speed_update_checks();
+
+    g = make_group(p, T("Đo", "Test"));
+    grouped_row(g, T(LV_SYMBOL_DOWNLOAD "  Tải xuống", LV_SYMBOL_DOWNLOAD "  Download"), on_speed_start, nullptr);
+    grouped_row(g, T(LV_SYMBOL_UPLOAD "  Tải lên", LV_SYMBOL_UPLOAD "  Upload"), on_speed_start, reinterpret_cast<void *>(1));
+    group_end(g);
+
+    g = make_group(p, T("Kết quả", "Result"));
+    lv_obj_set_style_pad_all(g, 16, 0);
+    s_speed_text = make_text(g, "", COLOR_TEXT);
+    speed_refresh();
+}
+
 void on_timer(lv_timer_t *t)
 {
     if (s_scan_done.exchange(false)) {
@@ -1155,6 +1237,8 @@ void on_timer(lv_timer_t *t)
             lv_slider_set_value(s_bri_slider, bri, LV_ANIM_OFF);
             lv_label_set_text_fmt(s_bri_val, "%d%%", bri);
         }
+    } else if (s_cur_page == PAGE_SPEED) {
+        speed_refresh();
     } else if (s_cur_page == PAGE_ABOUT) {
         static int tick;
         if ((++tick % 4) == 0) {
@@ -1250,6 +1334,8 @@ void build_ui()
     memset(s_pages, 0, sizeof(s_pages));
     memset(s_lang_check, 0, sizeof(s_lang_check));
     memset(s_tz_check, 0, sizeof(s_tz_check));
+    memset(s_speed_check, 0, sizeof(s_speed_check));
+    s_speed_text = nullptr;
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
     s_wifi_on = phone_net_is_enabled();     /* also switched from quick settings */
@@ -1290,6 +1376,7 @@ void build_ui()
         phone_monitor_set(lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED));
     });
     add_tile(lv_obj_get_parent(mon), kIconChart, 0x27AE60);
+    group_row(g, LV_SYMBOL_DOWNLOAD, 0x2F80ED, T("Tốc độ mạng", "Network speed"), nullptr, PAGE_SPEED);
     group_end(g);
 
     lv_obj_t *wifi = make_page(root, "Wi-Fi", PAGE_WIFI);
@@ -1440,6 +1527,8 @@ void build_ui()
     lv_obj_t *power = make_page(root, T("Nguồn", "Power"), PAGE_POWER);
     make_row(power, T("Tắt nguồn", "Power off"), nullptr, on_power_pick, reinterpret_cast<void *>(PHONE_POWER_OFF));
     make_row(power, T("Khởi động lại", "Restart"), nullptr, on_power_pick, reinterpret_cast<void *>(PHONE_POWER_RESTART));
+
+    build_speed_page(root);
 
     lv_obj_t *about = make_page(root, T("Giới thiệu", "About"), PAGE_ABOUT);
     make_text(about, "KSDIY ESP32-P4C5", COLOR_TEXT);

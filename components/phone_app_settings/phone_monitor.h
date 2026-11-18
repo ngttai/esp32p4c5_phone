@@ -16,6 +16,12 @@ void phone_monitor_init(void);
 void phone_monitor_set(bool on);
 bool phone_monitor_is_on(void);
 
+/**
+ * Internal RAM report in the log (tag MEMDUMP): task stacks, used heap blocks by size, the largest
+ * ones and the blocks taken since the last report. Made each time the monitor is turned on.
+ */
+void phone_memdump_report(void);
+
 #ifdef __cplusplus
 }
 #endif
