@@ -30,6 +30,7 @@
 #include "phone_storage.h"
 #include "phone_monitor.h"
 #include "phone_speedtest.h"
+#include "phone_membench.h"
 #include "esp_flash.h"
 #include "esp_psram.h"
 #include "phone_lock.h"
@@ -56,6 +57,7 @@ enum Page {
     PAGE_POWER,
     PAGE_ABOUT,
     PAGE_SPEED,
+    PAGE_MEM,
     PAGE_COUNT,
 };
 
@@ -1217,6 +1219,52 @@ void build_speed_page(lv_obj_t *root)
     speed_refresh();
 }
 
+/* Memory speed page (Settings > Debug) */
+lv_obj_t *s_mem_text;
+
+void mem_refresh()
+{
+    if (!s_mem_text) {
+        return;
+    }
+    phone_membench_t r;
+    phone_membench_get(&r);
+    if (r.running) {
+        lv_label_set_text(s_mem_text, T("Đang đo… (vài giây)", "Running… (a few seconds)"));
+    } else if (r.failed) {
+        lv_label_set_text(s_mem_text, T("Lỗi: không đủ bộ nhớ để đo", "Failed: not enough memory"));
+    } else if (!r.done) {
+        lv_label_set_text(s_mem_text, T("Bấm Đo: ghi, đọc và chép trên PSRAM (bộ đệm 1 MB, lớn hơn cache L2) và SRAM, đơn vị MB/s.",
+                                        "Tap Run: write, read and copy on PSRAM (1 MB buffers, larger than the L2 cache) and SRAM, in MB/s."));
+    } else {
+        lv_label_set_text_fmt(s_mem_text,
+                              "PSRAM %u MHz\n  %s %u   %s %u   %s %u\n"
+                              "SRAM\n  %s %u   %s %u   %s %u",
+                              static_cast<unsigned>(r.psram_mhz),
+                              T("ghi", "write"), static_cast<unsigned>(r.psram_write),
+                              T("đọc", "read"), static_cast<unsigned>(r.psram_read),
+                              T("chép", "copy"), static_cast<unsigned>(r.psram_copy),
+                              T("ghi", "write"), static_cast<unsigned>(r.sram_write),
+                              T("đọc", "read"), static_cast<unsigned>(r.sram_read),
+                              T("chép", "copy"), static_cast<unsigned>(r.sram_copy));
+    }
+}
+
+void build_mem_page(lv_obj_t *root)
+{
+    lv_obj_t *p = make_page(root, T("Tốc độ bộ nhớ", "Memory speed"), PAGE_MEM);
+    lv_obj_t *g = make_group(p, T("Đo", "Test"));
+    grouped_row(g, T(LV_SYMBOL_PLAY "  Đo", LV_SYMBOL_PLAY "  Run"), [](lv_event_t *) {
+        phone_membench_start();
+        mem_refresh();
+    }, nullptr);
+    group_end(g);
+    g = make_group(p, T("Kết quả (MB/s)", "Result (MB/s)"));
+    lv_obj_set_style_pad_all(g, 16, 0);
+    s_mem_text = make_text(g, "", COLOR_TEXT);
+    mem_refresh();
+}
+
 void on_timer(lv_timer_t *t)
 {
     if (s_scan_done.exchange(false)) {
@@ -1239,6 +1287,8 @@ void on_timer(lv_timer_t *t)
         }
     } else if (s_cur_page == PAGE_SPEED) {
         speed_refresh();
+    } else if (s_cur_page == PAGE_MEM) {
+        mem_refresh();
     } else if (s_cur_page == PAGE_ABOUT) {
         static int tick;
         if ((++tick % 4) == 0) {
@@ -1336,6 +1386,7 @@ void build_ui()
     memset(s_tz_check, 0, sizeof(s_tz_check));
     memset(s_speed_check, 0, sizeof(s_speed_check));
     s_speed_text = nullptr;
+    s_mem_text = nullptr;
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
     s_wifi_on = phone_net_is_enabled();     /* also switched from quick settings */
@@ -1377,6 +1428,7 @@ void build_ui()
     });
     add_tile(lv_obj_get_parent(mon), kIconChart, 0x27AE60);
     group_row(g, LV_SYMBOL_DOWNLOAD, 0x2F80ED, T("Tốc độ mạng", "Network speed"), nullptr, PAGE_SPEED);
+    group_row(g, LV_SYMBOL_CHARGE, 0xF2C94C, T("Tốc độ bộ nhớ", "Memory speed"), nullptr, PAGE_MEM);
     group_end(g);
 
     lv_obj_t *wifi = make_page(root, "Wi-Fi", PAGE_WIFI);
@@ -1529,6 +1581,7 @@ void build_ui()
     make_row(power, T("Khởi động lại", "Restart"), nullptr, on_power_pick, reinterpret_cast<void *>(PHONE_POWER_RESTART));
 
     build_speed_page(root);
+    build_mem_page(root);
 
     lv_obj_t *about = make_page(root, T("Giới thiệu", "About"), PAGE_ABOUT);
     make_text(about, "KSDIY ESP32-P4C5", COLOR_TEXT);
