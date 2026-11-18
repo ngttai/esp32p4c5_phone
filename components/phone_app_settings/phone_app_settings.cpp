@@ -31,6 +31,7 @@
 #include "phone_monitor.h"
 #include "phone_speedtest.h"
 #include "phone_membench.h"
+#include "phone_sdbench.h"
 #include "esp_flash.h"
 #include "esp_psram.h"
 #include "phone_lock.h"
@@ -1219,8 +1220,34 @@ void build_speed_page(lv_obj_t *root)
     speed_refresh();
 }
 
-/* Memory speed page (Settings > Debug) */
+/* Memory speed page (Settings > Debug): PSRAM and SRAM, then the microSD card */
 lv_obj_t *s_mem_text;
+lv_obj_t *s_sd_text;
+
+void sd_refresh()
+{
+    if (!s_sd_text) {
+        return;
+    }
+    phone_sdbench_t r;
+    phone_sdbench_get(&r);
+    if (r.running) {
+        lv_label_set_text(s_sd_text, T("Đang đo… (khoảng 10–20 giây)", "Running… (about 10-20 s)"));
+    } else if (r.failed) {
+        lv_label_set_text_fmt(s_sd_text, "%s: %s", T("Lỗi", "Failed"), r.error);
+    } else if (!r.done) {
+        lv_label_set_text(s_sd_text, T("Bấm Đo: ghi rồi đọc một tệp 8 MB trên thẻ (xóa sau khi đo), bộ đệm ở SRAM và ở PSRAM, đơn vị KB/s.",
+                                       "Tap Run: writes then reads an 8 MB file on the card (deleted after), buffer in SRAM and in PSRAM, in KB/s."));
+    } else {
+        lv_label_set_text_fmt(s_sd_text, "%s SRAM\n  %s %u   %s %u\n%s PSRAM\n  %s %u   %s %u",
+                              T("Bộ đệm", "Buffer in"),
+                              T("ghi", "write"), static_cast<unsigned>(r.sram_write),
+                              T("đọc", "read"), static_cast<unsigned>(r.sram_read),
+                              T("Bộ đệm", "Buffer in"),
+                              T("ghi", "write"), static_cast<unsigned>(r.psram_write),
+                              T("đọc", "read"), static_cast<unsigned>(r.psram_read));
+    }
+}
 
 void mem_refresh()
 {
@@ -1263,6 +1290,17 @@ void build_mem_page(lv_obj_t *root)
     lv_obj_set_style_pad_all(g, 16, 0);
     s_mem_text = make_text(g, "", COLOR_TEXT);
     mem_refresh();
+
+    g = make_group(p, T("Thẻ nhớ", "microSD card"));
+    grouped_row(g, T(LV_SYMBOL_SD_CARD "  Đo thẻ nhớ", LV_SYMBOL_SD_CARD "  Run on the card"), [](lv_event_t *) {
+        phone_sdbench_start();
+        sd_refresh();
+    }, nullptr);
+    group_end(g);
+    g = make_group(p, T("Kết quả thẻ nhớ (KB/s)", "Card result (KB/s)"));
+    lv_obj_set_style_pad_all(g, 16, 0);
+    s_sd_text = make_text(g, "", COLOR_TEXT);
+    sd_refresh();
 }
 
 void on_timer(lv_timer_t *t)
@@ -1289,6 +1327,7 @@ void on_timer(lv_timer_t *t)
         speed_refresh();
     } else if (s_cur_page == PAGE_MEM) {
         mem_refresh();
+        sd_refresh();
     } else if (s_cur_page == PAGE_ABOUT) {
         static int tick;
         if ((++tick % 4) == 0) {
@@ -1387,6 +1426,7 @@ void build_ui()
     memset(s_speed_check, 0, sizeof(s_speed_check));
     s_speed_text = nullptr;
     s_mem_text = nullptr;
+    s_sd_text = nullptr;
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
     s_wifi_on = phone_net_is_enabled();     /* also switched from quick settings */
