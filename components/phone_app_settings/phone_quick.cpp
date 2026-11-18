@@ -3,6 +3,7 @@
 #include <vector>
 #include "bsp/esp-bsp.h"
 #include "esp_brookesia.hpp"
+#include "esp_log.h"
 #include "lvgl_private.h"
 #include "phone_app_settings.hpp"
 #include "phone_audio.h"
@@ -15,6 +16,8 @@
 using namespace esp_brookesia::systems;
 
 namespace {
+
+const char *TAG = "quick";
 
 #define T(vi, en) phone_tr(vi, en)
 
@@ -230,6 +233,17 @@ void on_vol(lv_event_t *e)
 }
 
 /* ---- pull down from the top edge, swipe up to close ---- */
+
+/* A new gesture starts. s_swallow is cleared by the release event of the gesture that set it; if that
+ * release never reached us, every later gesture would stay hidden from the launcher and the apps
+ * (swipes dead, taps and the pull-down still working): clear it at the next start */
+void on_gesture_press(lv_event_t *)
+{
+    if (s_swallow && !s_open && !s_dragging) {
+        ESP_LOGW(TAG, "gesture swallow left set by the last gesture: cleared");
+        s_swallow = false;
+    }
+}
 
 void on_gesture(lv_event_t *e)
 {
@@ -463,6 +477,7 @@ void phone_quick_start(phone::Phone *phone)
     while (lv_obj_get_event_count(obj)) {
         lv_obj_remove_event(obj, 0);
     }
+    lv_obj_add_event_cb(obj, on_gesture_press, g->getPressEventCode(), nullptr);
     lv_obj_add_event_cb(obj, on_gesture, g->getPressingEventCode(), nullptr);
     lv_obj_add_event_cb(obj, on_gesture, g->getReleaseEventCode(), nullptr);
     for (const auto &l : others) {
