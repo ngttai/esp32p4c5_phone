@@ -35,6 +35,7 @@
 #endif
 #define ESP_UTILS_LOG_TAG "VIDEO"
 #include "esp_lib_utils.h"
+#include "phone_ui.h"
 #include "phone_audio.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
@@ -639,6 +640,7 @@ void build_ui()
     lv_obj_set_style_pad_row(s_list, 6, 0);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
+    phone_ui_scrollbar(s_list);
     lv_obj_update_layout(s_list);
 
     /* player: black page with the picture, and controls that hide while playing */

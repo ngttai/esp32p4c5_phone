@@ -31,6 +31,7 @@
 #endif
 #define ESP_UTILS_LOG_TAG "GALLERY"
 #include "esp_lib_utils.h"
+#include "phone_ui.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
 #include "phone_storage.h"
@@ -514,6 +515,7 @@ void build_ui()
     lv_obj_set_style_pad_column(s_grid, GRID_GAP, 0);
     lv_obj_set_style_pad_row(s_grid, GRID_GAP, 0);
     lv_obj_set_scroll_dir(s_grid, LV_DIR_VER);
+    phone_ui_scrollbar(s_grid);
 
     s_empty = lv_label_create(root);
     lv_obj_set_style_text_color(s_empty, lv_color_hex(COLOR_SUB), 0);

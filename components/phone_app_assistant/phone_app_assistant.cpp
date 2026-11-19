@@ -26,6 +26,7 @@
 #endif
 #define ESP_UTILS_LOG_TAG "ASSIST"
 #include "esp_lib_utils.h"
+#include "phone_ui.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
 #include "phone_lock.h"
@@ -524,6 +525,7 @@ void build_chat(lv_obj_t *root, int root_w, int root_h)
     lv_obj_set_style_pad_row(s_bubbles, 8, 0);
     lv_obj_set_flex_flow(s_bubbles, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(s_bubbles, LV_DIR_VER);
+    phone_ui_scrollbar(s_bubbles);
     s_bubble_count = 0;
 
     /* microphone button, in a ring that grows with the voice */

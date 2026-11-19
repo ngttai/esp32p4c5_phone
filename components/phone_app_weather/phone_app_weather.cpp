@@ -25,6 +25,7 @@
 #endif
 #define ESP_UTILS_LOG_TAG "WEATHER"
 #include "esp_lib_utils.h"
+#include "phone_ui.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
 #include "phone_net.h"
@@ -629,6 +630,7 @@ void build_ui()
     lv_obj_set_flex_flow(s_content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_scroll_dir(s_content, LV_DIR_VER);
+    phone_ui_scrollbar(s_content);
     lv_obj_move_background(s_content);
 
     /* city picker: covers the page */
@@ -642,6 +644,7 @@ void build_ui()
     lv_obj_set_style_pad_row(s_cities, 8, 0);
     lv_obj_set_flex_flow(s_cities, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(s_cities, LV_DIR_VER);
+    phone_ui_scrollbar(s_cities);
     lv_obj_add_flag(s_cities, LV_OBJ_FLAG_HIDDEN);
     lv_obj_t *title = lv_label_create(s_cities);
     lv_obj_set_style_text_font(title, phone_font_by_size(24), 0);

@@ -38,6 +38,7 @@
 #define ESP_UTILS_LOG_TAG "MUSIC"
 #include "esp_lib_utils.h"
 #include "music_service.hpp"
+#include "phone_ui.h"
 #include "phone_audio.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
@@ -1058,6 +1059,7 @@ void build_ui()
     lv_obj_set_style_pad_row(s_list, ROW_GAP, 0);
     lv_obj_set_flex_flow(s_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(s_list, LV_DIR_VER);
+    phone_ui_scrollbar(s_list);
     lv_obj_add_event_cb(s_list, on_scroll, LV_EVENT_SCROLL_BEGIN, nullptr);
     lv_obj_add_event_cb(s_list, on_scroll, LV_EVENT_SCROLL_END, nullptr);
 
