@@ -234,9 +234,9 @@ void show_list_state()
     }
     lv_label_set_text(s_status, why);
     lv_label_set_text(s_empty_text,
-                      T("Chép tệp mẫu examples/phone/sdcard/radio/stations.json trong repo vào thư mục radio của thẻ "
+                      T("Chép tệp mẫu sdcard/radio/stations.json trong repo vào thư mục radio của thẻ "
                         "(dùng ổ USB của app Tệp), rồi bấm Thử lại.\n\nMỗi đài: { \"name\": \"Tên đài\", \"url\": \"https://.../playlist.m3u8\" }",
-                        "Copy the sample examples/phone/sdcard/radio/stations.json of the repository to the radio folder of "
+                        "Copy the sample sdcard/radio/stations.json of the repository to the radio folder of "
                         "the card (USB drive of the Files app), then tap Retry.\n\nEach station: { \"name\": \"Name\", \"url\": \"https://.../playlist.m3u8\" }"));
 }
 

@@ -4,7 +4,7 @@ dependencies:
   espressif/esp_websocket_client: ^1.6.1
   espressif/mcp-c-sdk:
     require: public
-    version: ^2.0.1
+    version: "~2.1.0"   # 2.1.0 is the version tested with the AI Assistant
   espressif/mqtt: 1.*
   idf: '>=5.5'
 description: Xiaozhi Agent which provides Xiaozhi API integration

@@ -1,4 +1,8 @@
-# BSP: ESP-Brookesia Phone example
+# KSDIY ESP32-P4C5 Phone
+
+ESP-Brookesia phone firmware for the KSDIY ESP32-P4C5 4.3" board, on top of the board support package
+[esp32p4c5_bsp](https://github.com/ngttai/esp32p4c5_bsp) (v0.2.0, fetched by the component manager). It was the
+`examples/phone` of that repository until v0.1.0 and has its own history since.
 
 ## Overview
 
@@ -64,6 +68,7 @@ Settings are stored in NVS (namespace `phone`).
 ## Software Requirements
 
 * ESP-IDF v6.1.
+* Internet access at the first build: the component manager fetches the BSP from GitHub and the other components from the Espressif registry.
 
 ## Layout
 
@@ -95,7 +100,7 @@ Settings are stored in NVS (namespace `phone`).
 - `components/brookesia_core/`: ESP-Brookesia core (phone system, GUI, stylesheets).
 - `components/brookesia_app_squareline_demo/`: Squareline demo app.
 - `components/phone_common_net/`: boot-time Wi-Fi for the RainMaker workflow; a no-op here (`CONFIG_RAINMAKER_APP_SUPPORT=n`).
-- `../../bsp/esp32p4c5_bsp/`: board support package, pulled in through `main/idf_component.yml`.
+- Board support package: `esp32p4c5_bsp` from GitHub, tag `v0.2.0`, pulled in by `main/idf_component.yml` (git source, `bsp/esp32p4c5_bsp`). To change the BSP alongside the phone, swap the git source for `override_path` to a local clone (the comment in that file shows it).
 
 ## Configuration
 
@@ -107,7 +112,7 @@ Settings are stored in NVS (namespace `phone`).
 
 ## Build and Flash
 
-Run the build from this directory:
+Run the build from the root of this repository:
 
 ```
 idf.py set-target esp32p4

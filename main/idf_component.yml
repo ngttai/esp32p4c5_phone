@@ -2,9 +2,12 @@
 dependencies:
   idf: ">=6.1"
 
+  # Board support package, from its GitHub releases (https://github.com/ngttai/esp32p4c5_bsp).
+  # To work on the BSP next to this repo, use override_path: "../../esp32p4c5_bsp/bsp/esp32p4c5_bsp" instead.
   esp32p4c5_bsp:
-    version: "*"
-    override_path: "../../../bsp/esp32p4c5_bsp"
+    git: https://github.com/ngttai/esp32p4c5_bsp.git
+    path: bsp/esp32p4c5_bsp
+    version: v0.2.0
 
   brookesia_core:
     version: "*"
