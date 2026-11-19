@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -903,10 +905,12 @@ void on_mute_toggle(lv_event_t *e)
     phone_pref_set("mute", s_muted ? 1 : 0);
     if (s_muted) {
         phone_audio_set_volume(0);
+        lv_slider_set_value(s_vol_slider, 0, LV_ANIM_ON);   /* the last volume stays in "vol" for unmuting */
         lv_label_set_text(s_vol_val, T("Tắt tiếng", "Muted"));
     } else {
         int v = phone_pref_get("vol", 60);
         phone_audio_set_volume(v);
+        lv_slider_set_value(s_vol_slider, v, LV_ANIM_ON);
         lv_label_set_text_fmt(s_vol_val, "%d%%", v);
         phone_audio_beep();
     }
@@ -1130,12 +1134,12 @@ void sync_sound_page()
             lv_obj_remove_state(s_mute_sw, LV_STATE_CHECKED);
         }
     }
+    if (lv_slider_get_value(s_vol_slider) != level) {
+        lv_slider_set_value(s_vol_slider, level, LV_ANIM_OFF);     /* muted: the lowest */
+    }
     if (muted) {
         lv_label_set_text(s_vol_val, T("Tắt tiếng", "Muted"));
     } else {
-        if (lv_slider_get_value(s_vol_slider) != level) {
-            lv_slider_set_value(s_vol_slider, level, LV_ANIM_OFF);
-        }
         lv_label_set_text_fmt(s_vol_val, "%d%%", level);
     }
 }
@@ -1337,8 +1341,40 @@ void on_timer(lv_timer_t *t)
 }
 
 
+enum SliderIcons { ICONS_BRIGHTNESS, ICONS_VOLUME };
+
+/* A sun of `side` pixels (the symbol font has none): a disc and eight rays */
+lv_obj_t *sun_icon(lv_obj_t *parent, int side)
+{
+    lv_obj_t *box = lv_obj_create(parent);
+    lv_obj_remove_style_all(box);
+    lv_obj_set_size(box, side, side);
+    lv_obj_remove_flag(box, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    const int disc = side * 3 / 7;
+    const int ray = std::max(3, side / 7);
+    glyph_part(box, (side - disc) / 2, (side - disc) / 2, disc, disc, LV_RADIUS_CIRCLE, 0, true);
+    const float r = (side - ray) / 2.0f;
+    for (int i = 0; i < 8; i++) {
+        const float a = i * 3.14159265f / 4;
+        const int x = static_cast<int>(lroundf(r + r * cosf(a)));
+        const int y = static_cast<int>(lroundf(r + r * sinf(a)));
+        glyph_part(box, x, y, ray, ray, LV_RADIUS_CIRCLE, 0, true);
+    }
+    return box;
+}
+
+lv_obj_t *symbol_icon(lv_obj_t *parent, const char *symbol)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(COLOR_TEXT), 0);
+    lv_label_set_text(l, symbol);
+    return l;
+}
+
+/* A card with the value above a slider, and an icon at each end of the slider (low, high) */
 lv_obj_t *build_slider_card(lv_obj_t *root, const char *title, const char *caption, int page, int min, int value,
-                            lv_event_cb_t cb, lv_event_cb_t done_cb, lv_obj_t **val_out)
+                            SliderIcons icons, lv_event_cb_t cb, lv_event_cb_t done_cb, lv_obj_t **val_out)
 {
     lv_obj_t *p = make_page(root, title, page);
     lv_obj_t *card = make_group(p, caption);
@@ -1349,11 +1385,27 @@ lv_obj_t *build_slider_card(lv_obj_t *root, const char *title, const char *capti
     lv_label_set_text_fmt(val, "%d%%", value);
     lv_obj_set_style_text_color(val, lv_color_hex(COLOR_TEXT), 0);
     *val_out = val;
-    lv_obj_t *s = lv_slider_create(card);
-    lv_obj_set_width(s, LV_PCT(92));
+
+    lv_obj_t *row = lv_obj_create(card);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 18, 0);
+    /* the knob (pad 9 around the 14 px bar) reaches 9 px above and below the bar: room for it, and no
+     * clipping by the row */
+    lv_obj_set_style_pad_ver(row, 10, 0);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    if (icons == ICONS_BRIGHTNESS) {
+        sun_icon(row, 18);
+    } else {
+        symbol_icon(row, LV_SYMBOL_MUTE);
+    }
+    lv_obj_t *s = lv_slider_create(row);
+    lv_obj_set_flex_grow(s, 1);
     lv_obj_set_height(s, 14);
     lv_obj_set_style_pad_all(s, 9, LV_PART_KNOB);
-    lv_obj_set_style_margin_bottom(s, 8, 0);
     lv_obj_set_ext_click_area(s, 16);
     lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s, lv_color_hex(COLOR_ACCENT), LV_PART_KNOB);
@@ -1361,6 +1413,11 @@ lv_obj_t *build_slider_card(lv_obj_t *root, const char *title, const char *capti
     lv_slider_set_value(s, value, LV_ANIM_OFF);
     lv_obj_add_event_cb(s, cb, LV_EVENT_VALUE_CHANGED, nullptr);
     lv_obj_add_event_cb(s, done_cb, LV_EVENT_RELEASED, nullptr);
+    if (icons == ICONS_BRIGHTNESS) {
+        sun_icon(row, 28);
+    } else {
+        symbol_icon(row, LV_SYMBOL_VOLUME_MAX);
+    }
     return s;
 }
 
@@ -1582,7 +1639,7 @@ void build_ui()
     s_kb = kb;
 
     s_bri_slider = build_slider_card(root, T("Màn hình", "Display"), T("Độ sáng", "Brightness"), PAGE_DISPLAY, 5,
-                      phone_pref_get("bri", 100), on_brightness, on_brightness_done, &s_bri_val);
+                      phone_pref_get("bri", 100), ICONS_BRIGHTNESS, on_brightness, on_brightness_done, &s_bri_val);
     lv_obj_t *to = make_group(s_pages[PAGE_DISPLAY], T("Tự tắt màn hình", "Screen timeout"));
     for (int i = 0; i < phone_lock_timeout_count(); i++) {
         lv_obj_t *row = grouped_row(to, phone_lock_timeout_label(i), on_timeout_pick, reinterpret_cast<void *>(static_cast<intptr_t>(i)));
@@ -1594,11 +1651,12 @@ void build_ui()
 
     s_muted = phone_pref_get("mute", 0) != 0;
     s_vol_slider = build_slider_card(root, T("Âm thanh", "Sound"), T("Âm lượng", "Volume"), PAGE_SOUND, 0,
-                                     phone_pref_get("vol", 60), on_volume, on_volume_done, &s_vol_val);
+                                     phone_pref_get("vol", 60), ICONS_VOLUME, on_volume, on_volume_done, &s_vol_val);
     lv_obj_t *sound_opts = make_group(s_pages[PAGE_SOUND], T("Tùy chọn", "Options"));
     s_mute_sw = switch_row(sound_opts, T("Tắt tiếng", "Mute"), s_muted, on_mute_toggle);
     group_end(sound_opts);
     if (s_muted) {
+        lv_slider_set_value(s_vol_slider, 0, LV_ANIM_OFF);
         lv_label_set_text(s_vol_val, T("Tắt tiếng", "Muted"));
     }
     lv_obj_t *lang = make_page(root, T("Ngôn ngữ", "Language"), PAGE_LANG);
