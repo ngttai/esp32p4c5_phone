@@ -7,6 +7,7 @@
 #include "radio_player.hpp"
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -24,7 +25,9 @@
 #include "esp_gmf_obj.h"
 #include "esp_gmf_pipeline.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "esp_hls_io.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
@@ -360,6 +363,165 @@ int on_segment(esp_hls_file_seg_info_t *info, void *ctx)
     return 0;
 }
 
+/* ---- ICY metadata (Icecast / Shoutcast streams) ----
+ * With "Icy-MetaData: 1" in the request, the server answers "icy-metaint: N" and puts a metadata block
+ * after every N bytes of sound: one length byte L, then L * 16 bytes of text, for example
+ * "StreamTitle='Artist - Song';". The read hook takes the blocks out, so the decoder only gets sound,
+ * and keeps the title. All in the HTTP reader task, except title(). */
+
+struct Icy {
+    int metaint;                // 0: no metadata in this stream
+    int to_meta;                // sound bytes left before the next length byte
+    int meta_left;              // text bytes left in the current block
+    int meta_len;
+    char meta[16 * 255 + 1];
+};
+EXT_RAM_BSS_ATTR Icy s_icy;          // 4 KB, in PSRAM
+std::mutex s_title_mtx;
+std::string s_title;
+
+/* ISO-8859-1 text (older servers) to UTF-8; UTF-8 text unchanged */
+std::string to_utf8(const char *p, size_t n)
+{
+    bool utf8 = true;
+    for (size_t i = 0; i < n && utf8;) {
+        const uint8_t c = p[i];
+        const int len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        if (!len || i + len > n) {
+            utf8 = false;
+            break;
+        }
+        for (int k = 1; k < len; k++) {
+            utf8 = utf8 && (static_cast<uint8_t>(p[i + k]) >> 6) == 2;
+        }
+        i += len;
+    }
+    if (utf8) {
+        return std::string(p, n);
+    }
+    std::string out;
+    for (size_t i = 0; i < n; i++) {
+        const uint8_t c = p[i];
+        if (c < 0x80) {
+            out += static_cast<char>(c);
+        } else {
+            out += static_cast<char>(0xC0 | (c >> 6));
+            out += static_cast<char>(0x80 | (c & 0x3F));
+        }
+    }
+    return out;
+}
+
+void icy_block_done()
+{
+    s_icy.meta[s_icy.meta_len] = '\0';
+    const char *t = strstr(s_icy.meta, "StreamTitle='");
+    if (!t) {
+        return;
+    }
+    t += 13;
+    const char *end = strstr(t, "';");
+    const size_t n = end ? static_cast<size_t>(end - t) : strlen(t);
+    std::string title = to_utf8(t, n);
+    std::lock_guard<std::mutex> lk(s_title_mtx);
+    if (title != s_title) {
+        s_title = title;
+        ESP_LOGI(TAG, "now playing: %s", s_title.c_str());
+    }
+}
+
+/* Takes the metadata out of buf[0..n): returns the sound bytes left at the front of buf */
+int icy_filter(char *buf, int n)
+{
+    int out = 0;
+    for (int i = 0; i < n;) {
+        if (s_icy.meta_left > 0) {
+            const int k = std::min(n - i, s_icy.meta_left);
+            memcpy(s_icy.meta + s_icy.meta_len, buf + i, k);
+            s_icy.meta_len += k;
+            s_icy.meta_left -= k;
+            i += k;
+            if (s_icy.meta_left == 0) {
+                icy_block_done();
+                s_icy.to_meta = s_icy.metaint;
+            }
+        } else if (s_icy.to_meta == 0) {
+            const int len = static_cast<uint8_t>(buf[i++]) * 16;      /* the length byte */
+            s_icy.meta_len = 0;
+            s_icy.meta_left = len;
+            if (len == 0) {
+                s_icy.to_meta = s_icy.metaint;                     /* no change of title */
+            }
+        } else {
+            const int k = std::min(n - i, s_icy.to_meta);
+            memmove(buf + out, buf + i, k);
+            out += k;
+            s_icy.to_meta -= k;
+            i += k;
+        }
+    }
+    return out;
+}
+
+/* Hook of the HTTP reader (io_http_tls): direct streams, also used by HLS for its segments */
+int http_hook(http_stream_event_msg_t *msg)
+{
+    auto *client = static_cast<esp_http_client_handle_t>(msg->http_client);
+    switch (msg->event_id) {
+    case HTTP_STREAM_PRE_REQUEST:
+        s_icy.metaint = 0;
+        s_icy.meta_left = 0;
+        esp_http_client_set_header(client, "Icy-MetaData", "1");
+        return 0;
+    case HTTP_STREAM_ON_HEADER: {
+        const auto *evt = static_cast<const esp_http_client_event_t *>(msg->buffer);
+        if (strcasecmp(evt->header_key, "icy-metaint") == 0) {
+            const int m = atoi(evt->header_value);
+            if (m > 0 && m <= 1024 * 1024) {
+                s_icy.metaint = m;
+                s_icy.to_meta = m;
+                ESP_LOGI(TAG, "ICY metadata every %d bytes", m);
+            }
+        } else if (strcasecmp(evt->header_key, "Content-Type") == 0 && !s_seg_format) {
+            char v[48];
+            snprintf(v, sizeof(v), "%s", evt->header_value);
+            for (char *c = v; *c; c++) {
+                *c = static_cast<char>(tolower(static_cast<unsigned char>(*c)));
+            }
+            /* the format line of direct streams (HLS sets it from its segments) */
+            if (strstr(v, "mpeg") && !strstr(v, "mpegurl")) {
+                s_seg_format = ESP_FOURCC_MP3;
+            } else if (strstr(v, "aac")) {
+                s_seg_format = ESP_FOURCC_AAC;
+            } else if (strstr(v, "ogg")) {
+                s_seg_format = ESP_FOURCC_OGG;
+            } else if (strstr(v, "flac")) {
+                s_seg_format = ESP_FOURCC_FLAC;
+            }
+        }
+        return 0;
+    }
+    case HTTP_STREAM_ON_RESPONSE: {
+        if (s_icy.metaint == 0) {
+            return 0;                       /* plain read by the reader */
+        }
+        /* read and strip until some sound is left (a read may hold metadata only) */
+        for (;;) {
+            const int r = esp_http_client_read(client, static_cast<char *>(msg->buffer), msg->buffer_len);
+            if (r <= 0) {
+                return r < 0 ? -1 : 0;      /* 0: the reader reads again and sees the end */
+            }
+            const int out = icy_filter(static_cast<char *>(msg->buffer), r);
+            if (out > 0) {
+                return out;
+            }
+        }
+    }
+    default:
+        return 0;
+    }
+}
+
 /* The pool has a plain "io_http" already; HLS fetches over https need the certificate bundle, so this
  * one has its own tag and scores higher on http(s) URLs that are not playlists */
 esp_gmf_err_t http_score(esp_gmf_io_handle_t, const char *url, int *score)
@@ -420,6 +582,7 @@ bool create_player()
     http_io_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
     http_cfg.dir = ESP_GMF_IO_DIR_READER;
     http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    http_cfg.event_handle = http_hook;
     esp_gmf_io_handle_t http_io = nullptr;
     if (esp_gmf_io_http_init(&http_cfg, &http_io) == ESP_GMF_ERR_OK && http_io) {
         reinterpret_cast<esp_gmf_io_t *>(http_io)->get_score = http_score;
@@ -610,6 +773,10 @@ void play(const std::string &url)
     s_gen++;
     s_rate = 0;
     s_seg_format = 0;
+    {
+        std::lock_guard<std::mutex> lk(s_title_mtx);
+        s_title.clear();
+    }
     s_want = true;
     set_status(Status::CONNECTING);
     ensure_tasks();
@@ -673,6 +840,12 @@ void bars(uint8_t out[BAR_COUNT])
     portENTER_CRITICAL(&s_bar_mux);
     memcpy(out, s_bars, BAR_COUNT);
     portEXIT_CRITICAL(&s_bar_mux);
+}
+
+void title(char *buf, size_t len)
+{
+    std::lock_guard<std::mutex> lk(s_title_mtx);
+    snprintf(buf, len, "%s", s_title.c_str());
 }
 
 } // namespace radio

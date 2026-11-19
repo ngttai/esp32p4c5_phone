@@ -71,6 +71,7 @@ lv_obj_t *s_list;
 lv_timer_t *s_timer;
 int s_tick;
 int s_shown_status = -1;
+const char *s_status_text = "";
 int s_shown_cur = -2;
 
 uint32_t mix(uint32_t a, uint32_t b, float t)
@@ -321,12 +322,22 @@ void on_timer(lv_timer_t *)
                    : T("Không phát được đài này", "Cannot play this station");
             break;
         }
-        lv_label_set_text(s_status, text);
         lv_obj_set_style_text_color(s_status, lv_color_hex(st == radio::Status::PLAYING ? COLOR_ACCENT : COLOR_SUB), 0);
         if (st == radio::Status::FAILED || st == radio::Status::STOPPED) {
             s_playing = false;
         }
         lv_label_set_text(s_play_label, s_playing ? LV_SYMBOL_STOP : LV_SYMBOL_PLAY);
+        s_status_text = text;
+    }
+    /* while playing, the song of an Icecast stream (ICY title) in place of "Playing" */
+    char song[160] = "";
+    if (st == radio::Status::PLAYING) {
+        radio::title(song, sizeof(song));
+    }
+    const char *want = song[0] ? song : s_status_text;
+    if (strcmp(lv_label_get_text(s_status), want) != 0) {
+        lv_label_set_long_mode(s_status, song[0] ? LV_LABEL_LONG_MODE_SCROLL_CIRCULAR : LV_LABEL_LONG_MODE_WRAP);
+        lv_label_set_text(s_status, want);
     }
     char fmt[48];
     radio::format(fmt, sizeof(fmt));

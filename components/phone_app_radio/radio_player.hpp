@@ -29,5 +29,6 @@ Status status();
 bool busy_speaker();                   // the last FAILED was a busy speaker (another app plays)
 void format(char *buf, size_t len);    // "AAC · 48 kHz stereo", empty before the first sound
 void bars(uint8_t out[BAR_COUNT]);     // 0..255 per band
+void title(char *buf, size_t len);     // song of an Icecast stream (ICY StreamTitle), empty if none
 
 } // namespace radio
