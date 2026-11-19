@@ -19,12 +19,12 @@ enum class Status {
 /**
  * HLS internet radio through the GMF simple player (port of the radio of MetalioClaw4): playlist and
  * segments over HTTP(S) with the certificate bundle, AAC/MP3/TS segments, played at the stream rate
- * on the speaker (mixed to mono), and a 12-band spectrum of the sound. All calls return at once except
- * shutdown(); none takes the LVGL lock.
+ * on the speaker (mixed to mono), and a 12-band spectrum of the sound. All calls return at once; none
+ * takes the LVGL lock.
  */
 void play(const std::string &url);     // start, or switch to another station
 void stop();
-void shutdown();                       // stop and end the tasks, give the speaker back (waits up to 3 s)
+void shutdown();                       // give the speaker back, stop and end the tasks (returns within 0.2 s)
 Status status();
 bool busy_speaker();                   // the last FAILED was a busy speaker (another app plays)
 void format(char *buf, size_t len);    // "AAC · 48 kHz stereo", empty before the first sound

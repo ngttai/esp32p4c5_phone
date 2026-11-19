@@ -6,7 +6,8 @@ namespace esp_brookesia::apps {
 
 /**
  * Radio: HLS internet radio stations listed in /sdcard/radio/stations.json (no built-in list), with a
- * 12-band spectrum. Leaving the app (home or close) stops the sound.
+ * 12-band spectrum. It keeps playing in the background; closing the app stops it, and so does another
+ * player taking the speaker.
  */
 class PhoneRadio: public systems::phone::App {
 public:

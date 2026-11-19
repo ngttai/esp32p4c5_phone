@@ -60,22 +60,57 @@ extern "C" int phone_audio_get_volume(void)
     return s_volume;
 }
 
-extern "C" void *phone_audio_speaker_take(void)
+namespace {
+
+std::atomic<phone_audio_yield_cb_t> s_yield;   // of the current holder, or null
+
+void *take(phone_audio_yield_cb_t yield_cb)
 {
     if (s_busy.exchange(true)) {
-        return nullptr;
+        /* a holder that can stop is asked to; otherwise (a beep of 150 ms, video, assistant) only a
+         * short wait for the beep */
+        const phone_audio_yield_cb_t yield = s_yield.load();
+        if (yield) {
+            ESP_LOGI(TAG, "speaker busy: asking its holder to stop");
+            yield();
+        }
+        const int tries = yield ? 150 : 15;
+        bool got = false;
+        for (int i = 0; i < tries && !got; i++) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            got = !s_busy.exchange(true);
+        }
+        if (!got) {
+            ESP_LOGW(TAG, "speaker busy");
+            return nullptr;
+        }
     }
     if (!s_spk) {
         s_spk = bsp_audio_codec_speaker_init();
     }
     if (!s_spk) {
         s_busy = false;
+        return nullptr;
     }
+    s_yield = yield_cb;
     return s_spk;
+}
+
+} // namespace
+
+extern "C" void *phone_audio_speaker_take(void)
+{
+    return take(nullptr);
+}
+
+extern "C" void *phone_audio_speaker_take_yielding(phone_audio_yield_cb_t yield_cb)
+{
+    return take(yield_cb);
 }
 
 extern "C" void phone_audio_speaker_give(void)
 {
+    s_yield = nullptr;
     s_busy = false;
 }
 

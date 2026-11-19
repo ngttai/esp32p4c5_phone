@@ -55,6 +55,7 @@ std::atomic<bool> s_heard;                  // sound came out in this run
 std::atomic<int> s_status{static_cast<int>(Status::STOPPED)};
 std::atomic<bool> s_speaker_busy;
 std::atomic<TaskHandle_t> s_task;
+std::mutex s_life_mtx;                      // a task ending vs. ensure_tasks() starting it again
 std::atomic<TaskHandle_t> s_fft_task;
 esp_asp_handle_t s_player;                  // play task only (and the stop worker while s_stop_busy)
 
@@ -65,7 +66,8 @@ std::atomic<uint32_t> s_seg_format;
 uint32_t s_hls_last_format;
 
 /* output, in the player task */
-esp_codec_dev_handle_t s_spk;               // taken by the play task
+esp_codec_dev_handle_t s_spk;               // taken by the play task; given back by it or by a yield
+std::mutex s_spk_mtx;                       // s_spk and the codec: output callback, play task, yield
 int s_open_rate;
 int s_volume = -1;
 int16_t *s_mono;
@@ -148,6 +150,17 @@ uint32_t magnitude(const int16_t *d, int k)
     return isqrt(static_cast<uint32_t>(re * re) + static_cast<uint32_t>(im * im));
 }
 
+/* True when the task may end: the app was not opened again meanwhile (else s_task stays and it goes on) */
+bool may_end(std::atomic<TaskHandle_t> &slot)
+{
+    std::lock_guard<std::mutex> lk(s_life_mtx);
+    if (!s_quit) {
+        return false;
+    }
+    slot = nullptr;
+    return true;
+}
+
 /* 256-point FFT of the mono sound, 12 log bands 60 Hz - 6 kHz at the stream rate, about 30 times a second */
 void fft_task(void *)
 {
@@ -169,6 +182,7 @@ void fft_task(void *)
     int bands_rate = 0;
     float smooth[BAR_COUNT] = {};
     static int16_t pcm[FFT_N];
+again:
     while (!s_quit) {
         const int rate = s_rate;
         if (!s_want || rate <= 0) {
@@ -220,17 +234,22 @@ void fft_task(void *)
         publish(smooth);
         vTaskDelay(pdMS_TO_TICKS(30));
     }
-    const float zero[BAR_COUNT] = {};
-    publish(zero);
+    {
+        const float zero[BAR_COUNT] = {};
+        publish(zero);
+    }
+    if (!may_end(s_fft_task)) {
+        goto again;
+    }
     esp_gmf_fft_free_aligned(buf);
     esp_gmf_fft_deinit(&fft);
-    s_fft_task = nullptr;
     vTaskDeleteWithCaps(nullptr);
 }
 
 /* ---- player ---- */
 
-void close_codec()
+/* With s_spk_mtx held */
+void close_codec_locked()
 {
     if (s_spk && s_open_rate) {
         esp_codec_dev_close(s_spk);
@@ -238,10 +257,20 @@ void close_codec()
     s_open_rate = 0;
 }
 
+void close_codec()
+{
+    std::lock_guard<std::mutex> lk(s_spk_mtx);
+    close_codec_locked();
+}
+
 int on_output(uint8_t *data, int size, void *)
 {
-    if (!s_want || s_quit || !s_spk || size <= 0) {
+    if (!s_want || s_quit || size <= 0) {
         return 0;
+    }
+    std::lock_guard<std::mutex> lk(s_spk_mtx);
+    if (!s_spk) {
+        return 0;                           /* given away to another player: the pipeline is stopping */
     }
     const int rate = s_rate;
     const int ch = std::max(1, s_channels.load());
@@ -249,7 +278,7 @@ int on_output(uint8_t *data, int size, void *)
         return 0;
     }
     if (rate != s_open_rate) {
-        close_codec();
+        close_codec_locked();
         esp_codec_dev_sample_info_t fs = {};
         fs.sample_rate = rate;
         fs.channel = 1;
@@ -419,9 +448,12 @@ bool create_player()
     return true;
 }
 
+/* Any task: closes the codec and gives the speaker back at once, even while the pipeline still runs
+ * (the output callback finds no speaker and drops the sound) */
 void release_speaker()
 {
-    close_codec();
+    std::lock_guard<std::mutex> lk(s_spk_mtx);
+    close_codec_locked();
     if (s_spk) {
         s_spk = nullptr;
         phone_audio_speaker_give();
@@ -451,6 +483,7 @@ void play_task(void *)
 {
     int failures = 0;
     uint32_t failure_gen = s_gen;
+again:
     while (!s_quit) {
         if (!s_want) {
             release_speaker();
@@ -462,7 +495,19 @@ void play_task(void *)
             continue;
         }
         if (!s_spk) {
-            s_spk = static_cast<esp_codec_dev_handle_t>(phone_audio_speaker_take());
+            /* another player taking the speaker (music, video, assistant) stops the radio */
+            /* the GMF pipeline can take seconds to stop (stuck in an HTTP open): the speaker is given back
+             * first, the pipeline stops after */
+            auto *spk = static_cast<esp_codec_dev_handle_t>(phone_audio_speaker_take_yielding([]() {
+                ESP_LOGI(TAG, "another player takes the speaker: stop");
+                s_want = false;
+                release_speaker();
+                stop();
+            }));
+            {
+                std::lock_guard<std::mutex> lk(s_spk_mtx);
+                s_spk = spk;
+            }
             if (!s_spk) {
                 ESP_LOGW(TAG, "speaker busy");
                 s_speaker_busy = true;
@@ -526,12 +571,15 @@ void play_task(void *)
     s_mono = nullptr;
     s_mono_cap = 0;
     set_status(Status::STOPPED);
-    s_task = nullptr;
+    if (!may_end(s_task)) {
+        goto again;
+    }
     vTaskDeleteWithCaps(nullptr);
 }
 
 void ensure_tasks()
 {
+    std::lock_guard<std::mutex> lk(s_life_mtx);
     s_quit = false;
     if (!s_task) {
         TaskHandle_t t = nullptr;
@@ -584,15 +632,16 @@ void shutdown()
 {
     s_want = false;
     s_quit = true;
+    release_speaker();                      /* at once: the pipeline may take seconds to stop */
     interrupt();
     if (TaskHandle_t t = s_task) {
         xTaskNotifyGive(t);
     }
-    for (int i = 0; i < 150 && (s_task || s_fft_task); i++) {
+    /* No wait: this runs in the LVGL task (app closed), and the GMF pipeline can take seconds to stop
+     * (stuck in an HTTP open). The speaker is already given back; the tasks end and free the player on
+     * their own. Opening the app again meanwhile reuses the play task (ensure_tasks clears s_quit). */
+    for (int i = 0; i < 10 && (s_task || s_fft_task); i++) {
         vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    if (s_task || s_fft_task) {
-        ESP_LOGW(TAG, "tasks still running after 3 s");
     }
 }
 

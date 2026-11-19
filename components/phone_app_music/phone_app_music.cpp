@@ -311,7 +311,11 @@ bool play_file(const std::string &path)
     auto *in = static_cast<uint8_t *>(malloc(IN_SIZE));
     auto *pcm = static_cast<uint8_t *>(malloc(pcm_size));
     FILE *file = fopen(path.c_str(), "rb");
-    auto spk = static_cast<esp_codec_dev_handle_t>(phone_audio_speaker_take());
+    /* the newest player wins: the radio (or a video) taking the speaker stops the music */
+    auto spk = static_cast<esp_codec_dev_handle_t>(phone_audio_speaker_take_yielding([]() {
+        s_req = -1;
+        s_stop = true;
+    }));
     esp_audio_simple_dec_cfg_t cfg = {};
     cfg.dec_type = type_of(path.c_str());
     long size = 0;

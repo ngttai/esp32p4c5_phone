@@ -571,11 +571,10 @@ bool PhoneRadio::close()
     return true;
 }
 
-/* Home: the sound stops (no background radio yet); play starts it again */
+/* Home: the radio keeps playing in the background (and with the screen off); closing the app stops
+ * it, and so does another player taking the speaker */
 bool PhoneRadio::pause()
 {
-    s_playing = false;
-    radio::stop();
     return true;
 }
 
