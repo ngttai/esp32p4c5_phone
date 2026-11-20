@@ -57,8 +57,11 @@ constexpr int ALIGN = 128;                  // L2 cache line, required for PPA o
 constexpr int CONTROLS_H = 150;             // bar under the picture
 constexpr int FRAME_BUFS = 3;
 constexpr size_t FRAME_SIZE = 512 * 1024;   // one MJPEG frame of the webcam
-constexpr int MAX_W = 1280;                 // largest format asked from the webcam
-constexpr int MAX_H = 720;
+/* Largest format asked from the webcam. The host reads one ISOC packet per microframe (no high-bandwidth
+ * endpoints, see patches/usb_host_uvc-single-transaction-isoc.patch), about 1 KB per 125 us; at 720p some
+ * webcams (EMEET PIXY 4K) need 3 KB and send broken frames, at 640 x 480 they fit. */
+constexpr int MAX_W = 640;
+constexpr int MAX_H = 480;
 constexpr int FORMATS_MAX = 48;
 constexpr const char *PHOTO_DIR = "/sdcard/DCIM";
 
@@ -212,16 +215,27 @@ int save_photo(const uvc_host_frame_t *frame)
     if (phone_storage_get(nullptr, nullptr) != PHONE_STORAGE_MOUNTED) {
         return SHOT_NO_CARD;
     }
-    mkdir(PHOTO_DIR, 0775);
     char path[64];
-    photo_path(path, sizeof(path));
-    FILE *file = fopen(path, "wb");
-    if (!file) {
-        return SHOT_FAILED;
+    bool ok = false;
+    /* A write can time out while the SDIO link of the C5 shares the SDMMC host (Wi-Fi on): the card
+     * then refuses every command until it is power-cycled, so recover it and try once more */
+    for (int attempt = 0; attempt < 2 && !ok; attempt++) {
+        if (attempt > 0 && phone_storage_recover() != ESP_OK) {
+            break;
+        }
+        mkdir(PHOTO_DIR, 0775);
+        photo_path(path, sizeof(path));
+        FILE *file = fopen(path, "wb");
+        if (!file) {
+            continue;
+        }
+        ok = fwrite(frame->data, 1, frame->data_len, file) == frame->data_len;
+        if (fclose(file) != 0 || !ok) {
+            ok = false;
+            unlink(path);
+        }
     }
-    const bool ok = fwrite(frame->data, 1, frame->data_len, file) == frame->data_len;
-    if (fclose(file) != 0 || !ok) {
-        unlink(path);
+    if (!ok) {
         return SHOT_FAILED;
     }
     strlcpy(s_shot_name, strrchr(path, '/') + 1, sizeof(s_shot_name));
@@ -400,12 +414,22 @@ void worker(void *)
 bool s_host_installed;
 bool s_uvc_installed;
 
-void stop_camera()
+/* Returns false while the worker is still running: then nothing it uses (USB host, UVC driver, picture
+ * buffers) is released, freeing it under the worker crashes; the next stop_camera() finishes the work. */
+bool stop_camera()
 {
     if (s_worker) {
         s_stop = true;
-        if (xSemaphoreTake(s_worker_done, pdMS_TO_TICKS(5000)) != pdTRUE) {
-            ESP_LOGE(TAG, "worker did not stop");
+        if (xSemaphoreTake(s_worker_done, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            /* A webcam whose stream went wrong may not answer the control transfers of the stop (each one
+             * waits for its timeout): without VBUS it leaves the bus and they fail at once */
+            ESP_LOGW(TAG, "webcam does not answer, removing VBUS");
+            bsp_power_set(BSP_POWER_BOOST_5V, false);
+            if (xSemaphoreTake(s_worker_done, pdMS_TO_TICKS(8000)) != pdTRUE) {
+                ESP_LOGE(TAG, "worker did not stop, USB left installed");
+                s_state = ST_ERROR;
+                return false;
+            }
         }
         s_worker = nullptr;
     }
@@ -428,11 +452,13 @@ void stop_camera()
     }
     bsp_power_set(BSP_POWER_BOOST_5V, false);
     s_state = ST_OFF;
+    return true;
 }
 
 void start_camera()
 {
-    if (s_worker || s_host_installed) {
+    /* a stop that could not finish is completed first */
+    if ((s_worker || s_host_installed) && !stop_camera()) {
         return;
     }
     if (!s_frames) {
@@ -698,13 +724,15 @@ bool PhoneUsbCamera::back()
 
 bool PhoneUsbCamera::close()
 {
-    stop_camera();
+    const bool stopped = stop_camera();
     /* the image still points at a picture buffer until the core deletes the screen */
     if (s_img) {
         lv_obj_add_flag(s_img, LV_OBJ_FLAG_HIDDEN);
         lv_image_set_src(s_img, nullptr);
     }
-    free_out();
+    if (stopped) {
+        free_out();     // otherwise kept for the worker, and used again by the next run()
+    }
     return true;
 }
 

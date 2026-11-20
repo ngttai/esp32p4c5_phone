@@ -41,6 +41,14 @@ esp_err_t phone_storage_lend(sdmmc_card_t **card);
 /** Release the raw card and mount /sdcard again (never formatted). */
 esp_err_t phone_storage_take_back(void);
 
+/**
+ * After a write that timed out: the card may stay in its receive state and refuse every later
+ * command (ESP-IDF sends no STOP_TRANSMISSION). Unmount, power the card off and mount it again
+ * (never formatted). Not done while an app holds the card (its open files would be lost):
+ * ESP_ERR_INVALID_STATE then, and also when the card is not mounted.
+ */
+esp_err_t phone_storage_recover(void);
+
 #ifdef __cplusplus
 }
 #endif

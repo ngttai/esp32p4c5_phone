@@ -128,6 +128,31 @@ extern "C" esp_err_t phone_storage_lend(sdmmc_card_t **card)
     return err;
 }
 
+extern "C" esp_err_t phone_storage_recover(void)
+{
+    if (s_state != PHONE_STORAGE_MOUNTED) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    char holders[64];
+    if (phone_storage_holders(holders, sizeof(holders)) > 0) {
+        ESP_LOGW(TAG, "card stuck, not remounted: held by %s", holders);
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGW(TAG, "card stuck: power cycle and remount");
+    s_state = PHONE_STORAGE_CHECKING;
+    /* unmount releases slot 0 only (slot 1 is the SDIO link of the C5) and the LDO of the card */
+    esp_err_t err = bsp_sdcard_unmount();
+    if (err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(100));     // let the card supply fall
+        err = bsp_sdcard_mount();
+    }
+    s_state = err == ESP_OK ? PHONE_STORAGE_MOUNTED : PHONE_STORAGE_NO_CARD;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "recover: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
 extern "C" esp_err_t phone_storage_take_back(void)
 {
     if (s_state != PHONE_STORAGE_USB) {
