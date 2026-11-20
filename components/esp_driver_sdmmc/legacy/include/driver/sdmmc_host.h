@@ -190,6 +190,17 @@ esp_err_t sdmmc_host_set_cclk_always_on(int slot, bool cclk_always_on);
 esp_err_t sdmmc_host_do_transaction(int slot, sdmmc_command_t* cmdinfo);
 
 /**
+ * @brief Local change (README_LOCAL.md): send every multiple block write of this slot as
+ *        SET_BLOCK_COUNT (CMD23) + WRITE_MULTIPLE_BLOCK without the automatic STOP_TRANSMISSION
+ *        (CMD12), and a CMD12 after a failed write. A card that does not answer CMD23 goes back
+ *        to the automatic CMD12. Commands with SCF_NO_AUTO_STOP (0x4000) are left as they are.
+ *
+ * @param slot   slot number (SDMMC_HOST_SLOT_0 or SDMMC_HOST_SLOT_1)
+ * @param enable true to send counted writes
+ */
+void sdmmc_host_set_counted_writes(int slot, bool enable);
+
+/**
  * @brief Enable IO interrupts
  *
  * This function configures the host to accept SDIO interrupts.

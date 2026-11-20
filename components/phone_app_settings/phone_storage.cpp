@@ -1,6 +1,7 @@
 #include "phone_storage.h"
 #include <atomic>
 #include <cstring>
+#include "driver/sdmmc_host.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
@@ -17,10 +18,19 @@ constexpr int MAX_HOLDERS = 4;
 const char *s_holders[MAX_HOLDERS];
 portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 
+/* The card shares the SDMMC host with the SDIO link of the C5 (slot 1): the automatic CMD12 that ends a
+ * multiple block write sometimes reaches it broken and leaves it in the receive state. Writes go as
+ * CMD23 + CMD25 instead (local esp_driver_sdmmc, README_LOCAL.md). Set before each mount. */
+esp_err_t mount_card()
+{
+    sdmmc_host_set_counted_writes(SDMMC_HOST_SLOT_0, true);
+    return bsp_sdcard_mount();
+}
+
 void mount_task(void *)
 {
     /* The BSP never formats the card when mounting fails */
-    esp_err_t err = bsp_sdcard_mount();
+    esp_err_t err = mount_card();
     s_state = err == ESP_OK ? PHONE_STORAGE_MOUNTED : PHONE_STORAGE_NO_CARD;
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "No microSD card mounted: %s", esp_err_to_name(err));
@@ -144,7 +154,7 @@ extern "C" esp_err_t phone_storage_recover(void)
     esp_err_t err = bsp_sdcard_unmount();
     if (err == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(100));     // let the card supply fall
-        err = bsp_sdcard_mount();
+        err = mount_card();
     }
     s_state = err == ESP_OK ? PHONE_STORAGE_MOUNTED : PHONE_STORAGE_NO_CARD;
     if (err != ESP_OK) {
@@ -160,7 +170,7 @@ extern "C" esp_err_t phone_storage_take_back(void)
     }
     bsp_sdcard_raw_deinit();
     /* The BSP never formats the card when mounting fails */
-    esp_err_t err = bsp_sdcard_mount();
+    esp_err_t err = mount_card();
     s_state = err == ESP_OK ? PHONE_STORAGE_MOUNTED : PHONE_STORAGE_NO_CARD;
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "remount: %s", esp_err_to_name(err));
