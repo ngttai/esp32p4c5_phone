@@ -1,0 +1,6 @@
+dependencies:
+  # .mp4: software H.264 decoder (constrained baseline) and the MP4 demuxer
+  espressif/esp_h264: "~1.4.1"
+  espressif/esp_extractor: "~1.0.7"
+  # AAC sound of .mp4 files
+  espressif/esp_audio_codec: "^2.5"
