@@ -34,6 +34,7 @@
 #include "phone_speedtest.h"
 #include "phone_membench.h"
 #include "phone_sdbench.h"
+#include "phone_celltest.h"
 #include "esp_flash.h"
 #include "esp_psram.h"
 #include "phone_lock.h"
@@ -61,6 +62,7 @@ enum Page {
     PAGE_ABOUT,
     PAGE_SPEED,
     PAGE_MEM,
+    PAGE_CELL,
     PAGE_COUNT,
 };
 
@@ -1224,6 +1226,49 @@ void build_speed_page(lv_obj_t *root)
     speed_refresh();
 }
 
+/* 4G page (Settings > Debug): stage 0 of PLAN_4G.md, the probe of phone_celltest */
+lv_obj_t *s_cell_text;
+size_t s_cell_shown = SIZE_MAX;
+
+void cell_refresh()
+{
+    if (!s_cell_text) {
+        return;
+    }
+    static char text[3072];
+    phone_celltest_text(text, sizeof(text));
+    const size_t len = strlen(text) + (phone_celltest_running() ? 0 : 1);
+    if (len == s_cell_shown) {
+        return;                     /* unchanged: no relayout of the long label */
+    }
+    s_cell_shown = len;
+    if (!text[0]) {
+        lv_label_set_text(s_cell_text, T("Bấm Đo: bật module 4G (cần pin), đọc model, SIM, mạng, thử baud 230400 / 460800 / 921600, "
+                                         "CMUX và quay số PPP (ATD*99#). Khoảng 1-3 phút; module tắt khi xong. Log tag CELL.",
+                                         "Tap Run: powers the 4G module (needs the battery), reads model, SIM, network, tries 230400 / "
+                                         "460800 / 921600 baud, CMUX and a PPP dial (ATD*99#). About 1-3 min; the module is off "
+                                         "afterwards. Log tag CELL."));
+    } else {
+        lv_label_set_text(s_cell_text, text);
+    }
+}
+
+void build_cell_page(lv_obj_t *root)
+{
+    lv_obj_t *p = make_page(root, "4G", PAGE_CELL);
+    lv_obj_t *g = make_group(p, T("Đo", "Test"));
+    grouped_row(g, T(LV_SYMBOL_PLAY "  Đo", LV_SYMBOL_PLAY "  Run"), [](lv_event_t *) {
+        phone_celltest_start();
+        cell_refresh();
+    }, nullptr);
+    group_end(g);
+    g = make_group(p, T("Kết quả", "Result"));
+    lv_obj_set_style_pad_all(g, 12, 0);
+    s_cell_text = make_text(g, "", COLOR_TEXT);
+    lv_obj_set_style_text_font(s_cell_text, phone_font_by_size(12), 0);
+    cell_refresh();
+}
+
 /* Memory speed page (Settings > Debug): PSRAM and SRAM, then the microSD card */
 lv_obj_t *s_mem_text;
 lv_obj_t *s_sd_text;
@@ -1332,6 +1377,8 @@ void on_timer(lv_timer_t *t)
     } else if (s_cur_page == PAGE_MEM) {
         mem_refresh();
         sd_refresh();
+    } else if (s_cur_page == PAGE_CELL) {
+        cell_refresh();
     } else if (s_cur_page == PAGE_ABOUT) {
         static int tick;
         if ((++tick % 4) == 0) {
@@ -1484,6 +1531,8 @@ void build_ui()
     s_speed_text = nullptr;
     s_mem_text = nullptr;
     s_sd_text = nullptr;
+    s_cell_text = nullptr;
+    s_cell_shown = SIZE_MAX;
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
     s_wifi_on = phone_net_is_enabled();     /* also switched from quick settings */
@@ -1526,6 +1575,7 @@ void build_ui()
     add_tile(lv_obj_get_parent(mon), kIconChart, 0x27AE60);
     group_row(g, LV_SYMBOL_DOWNLOAD, 0x2F80ED, T("Tốc độ mạng", "Network speed"), nullptr, PAGE_SPEED);
     group_row(g, LV_SYMBOL_CHARGE, 0xF2C94C, T("Tốc độ bộ nhớ", "Memory speed"), nullptr, PAGE_MEM);
+    group_row(g, "4G", 0x27AE60, T("4G (đo module)", "4G (module probe)"), nullptr, PAGE_CELL);
     group_end(g);
 
     lv_obj_t *wifi = make_page(root, "Wi-Fi", PAGE_WIFI);
@@ -1679,6 +1729,7 @@ void build_ui()
     make_row(power, T("Khởi động lại", "Restart"), nullptr, on_power_pick, reinterpret_cast<void *>(PHONE_POWER_RESTART));
 
     build_speed_page(root);
+    build_cell_page(root);
     build_mem_page(root);
 
     lv_obj_t *about = make_page(root, T("Giới thiệu", "About"), PAGE_ABOUT);
