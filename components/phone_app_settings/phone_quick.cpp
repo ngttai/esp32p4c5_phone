@@ -453,6 +453,11 @@ void build()
 
 } // namespace
 
+bool phone_quick_visible(void)
+{
+    return s_shade && !lv_obj_has_flag(s_shade, LV_OBJ_FLAG_HIDDEN);
+}
+
 void phone_quick_start(phone::Phone *phone)
 {
     if (s_phone) {

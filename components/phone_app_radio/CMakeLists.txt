@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS phone_app_radio.cpp radio_player.cpp radio_stations.cpp phone_radio_icon.c
     INCLUDE_DIRS .
-    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings espressif__cjson mbedtls
+    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings phone_spectrum espressif__cjson mbedtls
     WHOLE_ARCHIVE
 )
 

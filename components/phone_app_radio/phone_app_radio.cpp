@@ -15,7 +15,9 @@
 #include "phone_fonts.h"
 #include "phone_locale.h"
 #include "phone_storage.h"
+#include "phone_quick.h"
 #include "radio_player.hpp"
+#include "phone_spectrum.hpp"
 #include "radio_stations.hpp"
 #include "phone_app_radio.hpp"
 
@@ -39,10 +41,6 @@ constexpr uint32_t COLOR_ROW_CUR = 0x1F3A3A;
 constexpr uint32_t COLOR_SUB = 0x9AA5B1;
 constexpr uint32_t COLOR_ACCENT = 0x2EC4B6;
 constexpr uint32_t COLOR_BUTTON = 0x2A333C;
-constexpr uint32_t RAINBOW[radio::BAR_COUNT] = {
-    0xFF3B5C, 0xFF6B2D, 0xFFB020, 0xFFE84A, 0x7CFF4A, 0x2DFFB0,
-    0x2DE8FF, 0x3D8BFF, 0x6B5CFF, 0xB24DFF, 0xFF4DC8, 0xFF4D7A,
-};
 constexpr int VIZ_H = 240;
 constexpr int BAR_GAP = 10;
 constexpr int BAR_MIN = 8;
@@ -58,7 +56,7 @@ lv_obj_t *s_title;
 lv_obj_t *s_status;
 lv_obj_t *s_format;
 lv_obj_t *s_viz;
-lv_obj_t *s_bars[radio::BAR_COUNT];
+spectrum::View s_view;                      // bars of the shared spectrum
 lv_obj_t *s_play_label;
 lv_obj_t *s_vol_slider;
 lv_obj_t *s_vol_label;
@@ -73,15 +71,6 @@ int s_tick;
 int s_shown_status = -1;
 const char *s_status_text = "";
 int s_shown_cur = -2;
-
-uint32_t mix(uint32_t a, uint32_t b, float t)
-{
-    auto ch = [&](int s) {
-        const float x = ((a >> s) & 0xFF) + (((b >> s) & 0xFF) - static_cast<float>((a >> s) & 0xFF)) * t;
-        return static_cast<uint32_t>(x) & 0xFF;
-    };
-    return (ch(16) << 16) | (ch(8) << 8) | ch(0);
-}
 
 void play_current()
 {
@@ -265,22 +254,9 @@ void on_retry(lv_event_t *)
 
 void update_bars()
 {
-    uint8_t lv[radio::BAR_COUNT];
-    radio::bars(lv);
-    const int w = lv_obj_get_content_width(s_viz);
-    const int h = lv_obj_get_content_height(s_viz);
-    const int bar_w = (w - (radio::BAR_COUNT - 1) * BAR_GAP) / radio::BAR_COUNT;
-    const int x0 = (w - (radio::BAR_COUNT * bar_w + (radio::BAR_COUNT - 1) * BAR_GAP)) / 2;
-    for (int i = 0; i < radio::BAR_COUNT; i++) {
-        const float t = lv[i] / 255.f;
-        const int bh = BAR_MIN + static_cast<int>((h - BAR_MIN) * t);
-        if (lv_obj_get_height(s_bars[i]) == bh) {
-            continue;
-        }
-        lv_obj_set_size(s_bars[i], bar_w, bh);
-        lv_obj_set_pos(s_bars[i], x0 + i * (bar_w + BAR_GAP), h - bh);
-        const uint32_t base = mix(RAINBOW[i], 0xFFFFFF, 0.35f * t);
-        lv_obj_set_style_bg_color(s_bars[i], lv_color_hex(mix(0x2A2F3A, base, 0.25f + 0.75f * t)), 0);
+    /* not under the quick settings panel: it covers the bars, and each change would redraw it */
+    if (!phone_quick_visible()) {
+        spectrum::view_update(s_view);
     }
 }
 
@@ -428,13 +404,7 @@ void build_ui()
     lv_obj_set_style_bg_color(s_viz, lv_color_hex(COLOR_CARD), 0);
     lv_obj_set_style_radius(s_viz, 18, 0);
     lv_obj_set_style_pad_all(s_viz, 18, 0);
-    for (auto &bar : s_bars) {
-        bar = plain(s_viz);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(bar, 4, 0);
-        lv_obj_set_height(bar, 0);
-    }
-    lv_obj_update_layout(s_viz);
+    spectrum::view_create(s_view, s_viz, BAR_GAP, BAR_MIN, 4);
 
     /* controls, volume, list */
     s_player_box = plain(root);

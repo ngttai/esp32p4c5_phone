@@ -19,8 +19,6 @@
 #include "esp_crt_bundle.h"
 #include "esp_fourcc.h"
 #include "esp_gmf_audio_dec.h"
-#include "esp_gmf_fft.h"
-#include "esp_gmf_fft_heap.h"
 #include "esp_gmf_io_http.h"
 #include "esp_gmf_obj.h"
 #include "esp_gmf_pipeline.h"
@@ -34,6 +32,7 @@
 #include "freertos/task.h"
 #include "media_lib_adapter.h"
 #include "phone_audio.h"
+#include "phone_spectrum.hpp"
 
 namespace radio {
 
@@ -42,10 +41,6 @@ namespace {
 const char *TAG = "radio";
 constexpr int MAX_CONNECT_FAILURES = 3;     // attempts in a row without sound before giving up
 constexpr uint32_t RETRY_MS = 1200;
-constexpr int FFT_N = 256;
-constexpr size_t RING = 2048;               // mono samples for the spectrum, power of 2
-constexpr float ATTACK = 0.55f;
-constexpr float RELEASE = 0.18f;
 
 std::mutex s_mtx;                           // s_url
 std::string s_url;
@@ -59,7 +54,6 @@ std::atomic<int> s_status{static_cast<int>(Status::STOPPED)};
 std::atomic<bool> s_speaker_busy;
 std::atomic<TaskHandle_t> s_task;
 std::mutex s_life_mtx;                      // a task ending vs. ensure_tasks() starting it again
-std::atomic<TaskHandle_t> s_fft_task;
 esp_asp_handle_t s_player;                  // play task only (and the stop worker while s_stop_busy)
 
 /* stream format, from the MUSIC_INFO event and the HLS segment callback */
@@ -76,81 +70,9 @@ int s_volume = -1;
 int16_t *s_mono;
 size_t s_mono_cap;
 
-/* spectrum */
-alignas(16) int16_t s_ring[RING];
-std::atomic<uint32_t> s_ring_w;
-std::atomic<uint32_t> s_ring_r;
-portMUX_TYPE s_bar_mux = portMUX_INITIALIZER_UNLOCKED;
-uint8_t s_bars[BAR_COUNT];
-
 void set_status(Status st)
 {
     s_status = static_cast<int>(st);
-}
-
-/* ---- spectrum ---- */
-
-void ring_push(const int16_t *p, int n)
-{
-    uint32_t w = s_ring_w.load(std::memory_order_relaxed);
-    for (int i = 0; i < n; i++) {
-        s_ring[w++ & (RING - 1)] = p[i];
-    }
-    s_ring_w.store(w, std::memory_order_release);
-    const uint32_t r = s_ring_r.load(std::memory_order_relaxed);
-    if (w - r > RING) {
-        s_ring_r.store(w - RING, std::memory_order_relaxed);
-    }
-}
-
-bool ring_pop(int16_t *out, int n)
-{
-    const uint32_t w = s_ring_w.load(std::memory_order_acquire);
-    uint32_t r = s_ring_r.load(std::memory_order_relaxed);
-    if (w - r < static_cast<uint32_t>(n)) {
-        return false;
-    }
-    for (int i = 0; i < n; i++) {
-        out[i] = s_ring[r++ & (RING - 1)];
-    }
-    s_ring_r.store(r, std::memory_order_release);
-    return true;
-}
-
-void publish(const float *levels)
-{
-    portENTER_CRITICAL(&s_bar_mux);
-    for (int i = 0; i < BAR_COUNT; i++) {
-        s_bars[i] = static_cast<uint8_t>(std::clamp(levels[i], 0.f, 1.f) * 255.f + 0.5f);
-    }
-    portEXIT_CRITICAL(&s_bar_mux);
-}
-
-uint32_t isqrt(uint32_t n)
-{
-    if (n == 0) {
-        return 0;
-    }
-    uint32_t x = n, y = (n + 1) >> 1;
-    while (y < x) {
-        x = y;
-        y = (x + n / x) >> 1;
-    }
-    return x;
-}
-
-uint32_t magnitude(const int16_t *d, int k)
-{
-    int32_t re, im = 0;
-    if (k == 0) {
-        re = d[0];
-    } else if (k == FFT_N / 2) {
-        re = d[1];
-    } else {
-        re = d[2 * k];
-        im = d[2 * k + 1];
-    }
-    return isqrt(static_cast<uint32_t>(re * re) + static_cast<uint32_t>(im * im));
 }
 
 /* True when the task may end: the app was not opened again meanwhile (else s_task stays and it goes on) */
@@ -162,91 +84,6 @@ bool may_end(std::atomic<TaskHandle_t> &slot)
     }
     slot = nullptr;
     return true;
-}
-
-/* 256-point FFT of the mono sound, 12 log bands 60 Hz - 6 kHz at the stream rate, about 30 times a second */
-void fft_task(void *)
-{
-    esp_gmf_fft_handle_t fft = nullptr;
-    const esp_gmf_fft_cfg_t cfg = {.n_fft = FFT_N, .fft_type = ESP_GMF_FFT_TYPE_REAL_Q15};
-    auto *buf = static_cast<int16_t *>(esp_gmf_fft_calloc_aligned(ESP_GMF_FFT_BUFFER_SIZE(FFT_N), sizeof(int16_t), 16));
-    if (!buf || esp_gmf_fft_init(&cfg, &fft) != ESP_GMF_FFT_OK) {
-        ESP_LOGE(TAG, "fft init failed");
-        esp_gmf_fft_free_aligned(buf);
-        s_fft_task = nullptr;
-        vTaskDeleteWithCaps(nullptr);
-        return;
-    }
-    static int16_t hann[FFT_N];
-    for (int i = 0; i < FFT_N; i++) {
-        hann[i] = static_cast<int16_t>(0.5f * (1.f - cosf(2.f * static_cast<float>(M_PI) * i / (FFT_N - 1))) * 32767.f);
-    }
-    int lo[BAR_COUNT], hi[BAR_COUNT];
-    int bands_rate = 0;
-    float smooth[BAR_COUNT] = {};
-    static int16_t pcm[FFT_N];
-again:
-    while (!s_quit) {
-        const int rate = s_rate;
-        if (!s_want || rate <= 0) {
-            for (float &v : smooth) {
-                v *= 1.f - RELEASE;
-            }
-            publish(smooth);
-            vTaskDelay(pdMS_TO_TICKS(40));
-            continue;
-        }
-        if (rate != bands_rate) {
-            bands_rate = rate;
-            const float bin_hz = static_cast<float>(rate) / FFT_N;
-            for (int b = 0; b < BAR_COUNT; b++) {
-                const float f0 = 60.f * powf(100.f, static_cast<float>(b) / BAR_COUNT);
-                const float f1 = 60.f * powf(100.f, static_cast<float>(b + 1) / BAR_COUNT);
-                lo[b] = std::max(1, static_cast<int>(f0 / bin_hz));
-                hi[b] = std::max(lo[b], std::min(FFT_N / 2 - 1, static_cast<int>(f1 / bin_hz)));
-            }
-        }
-        if (!ring_pop(pcm, FFT_N)) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-        for (int i = 0; i < FFT_N; i++) {
-            buf[i] = static_cast<int16_t>((static_cast<int32_t>(pcm[i]) * hann[i]) >> 15);
-        }
-        for (size_t i = FFT_N; i < ESP_GMF_FFT_BUFFER_SIZE(FFT_N); i++) {
-            buf[i] = 0;
-        }
-        if (esp_gmf_fft_forward(fft, buf) != ESP_GMF_FFT_OK) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
-        float raw[BAR_COUNT];
-        float peak = 1.f;
-        for (int b = 0; b < BAR_COUNT; b++) {
-            uint32_t sum = 0;
-            for (int k = lo[b]; k <= hi[b]; k++) {
-                sum += magnitude(buf, k);
-            }
-            raw[b] = static_cast<float>(sum) / (hi[b] - lo[b] + 1);
-            peak = std::max(peak, raw[b]);
-        }
-        for (int b = 0; b < BAR_COUNT; b++) {
-            const float n = sqrtf(std::clamp(raw[b] / peak, 0.f, 1.f));
-            smooth[b] += (n - smooth[b]) * (n > smooth[b] ? ATTACK : RELEASE);
-        }
-        publish(smooth);
-        vTaskDelay(pdMS_TO_TICKS(30));
-    }
-    {
-        const float zero[BAR_COUNT] = {};
-        publish(zero);
-    }
-    if (!may_end(s_fft_task)) {
-        goto again;
-    }
-    esp_gmf_fft_free_aligned(buf);
-    esp_gmf_fft_deinit(&fft);
-    vTaskDeleteWithCaps(nullptr);
 }
 
 /* ---- player ---- */
@@ -316,7 +153,7 @@ int on_output(uint8_t *data, int size, void *)
         esp_codec_dev_set_out_vol(s_spk, v);
     }
     esp_codec_dev_write(s_spk, s_mono, frames * 2);
-    ring_push(s_mono, frames);
+    spectrum::feed(s_mono, frames, rate);
     if (!s_heard.exchange(true)) {
         set_status(Status::PLAYING);
     }
@@ -751,15 +588,6 @@ void ensure_tasks()
             s_task = t;
         }
     }
-    if (!s_fft_task) {
-        s_ring_w = 0;
-        s_ring_r = 0;
-        TaskHandle_t t = nullptr;
-        if (xTaskCreatePinnedToCoreWithCaps(fft_task, "radio_fft", 6144, nullptr, 3, &t, tskNO_AFFINITY,
-                                            MALLOC_CAP_SPIRAM) == pdPASS) {
-            s_fft_task = t;
-        }
-    }
 }
 
 } // namespace
@@ -807,7 +635,7 @@ void shutdown()
     /* No wait: this runs in the LVGL task (app closed), and the GMF pipeline can take seconds to stop
      * (stuck in an HTTP open). The speaker is already given back; the tasks end and free the player on
      * their own. Opening the app again meanwhile reuses the play task (ensure_tasks clears s_quit). */
-    for (int i = 0; i < 10 && (s_task || s_fft_task); i++) {
+    for (int i = 0; i < 10 && s_task; i++) {
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -833,13 +661,6 @@ void format(char *buf, size_t len)
     const char *name = fmt ? ESP_FOURCC_TO_STR(fmt) : "";
     snprintf(buf, len, "%s%s%d.%d kHz %s", name, fmt ? " · " : "", rate / 1000, rate % 1000 / 100,
              s_channels >= 2 ? "stereo" : "mono");
-}
-
-void bars(uint8_t out[BAR_COUNT])
-{
-    portENTER_CRITICAL(&s_bar_mux);
-    memcpy(out, s_bars, BAR_COUNT);
-    portEXIT_CRITICAL(&s_bar_mux);
 }
 
 void title(char *buf, size_t len)

@@ -48,6 +48,9 @@
 #include "phone_fonts.h"
 #include "phone_locale.h"
 #include "phone_storage.h"
+#include "phone_lock.h"
+#include "phone_quick.h"
+#include "phone_spectrum.hpp"
 #include "phone_app_music.hpp"
 
 #define APP_NAME "Nhạc"
@@ -271,6 +274,7 @@ std::atomic<bool> s_error;              // the last track could not be played
 std::atomic<int> s_repeat{REPEAT_OFF};
 std::atomic<int> s_seek{-1};            // position asked by the progress slider, 0..1000
 std::atomic<bool> s_seekable;           // the playing file can be sought (not M4A / OGG)
+std::atomic<bool> s_viz_feed;           // the spectrum is on the screen: feed it the sound
 
 /* Tracks in the order of the list on the screen (all, or the favorites only), and the order they
  * play in: the same, or shuffled. Previous, next and the end of the list follow the play order.
@@ -571,6 +575,9 @@ bool play_file(const std::string &path)
                 break;          /* audio from before the jump is not played */
             }
             esp_codec_dev_write(spk, s, frames * 2);
+            if (s_viz_feed && v > 0) {
+                spectrum::feed(s, static_cast<int>(frames), static_cast<int>(rate));   /* muted: the bars fall */
+            }
             samples += frames;
             s_elapsed = static_cast<int>(samples / rate);
             s_file_permille = static_cast<int>(ftell(file) * 1000LL / size);
@@ -815,6 +822,13 @@ lv_obj_t *s_art;
 lv_obj_t *s_art_primary;
 lv_obj_t *s_art_secondary;
 lv_obj_t *s_cover_img;
+lv_obj_t *s_art_content;        // placeholder discs, note and cover
+lv_obj_t *s_viz;                // spectrum over the artwork, shown or not by a tap on it
+spectrum::View s_viz_view;
+bool s_show_viz;
+lv_obj_t *s_mute_badge;         // over the artwork while the volume is 0
+lv_obj_t *s_mute_icon;
+uint32_t s_mute_since;
 lv_obj_t *s_bar;                // progress slider, 0..1000
 lv_obj_t *s_play_label;
 lv_obj_t *s_repeat_label;
@@ -1290,6 +1304,64 @@ void on_repeat(lv_event_t *)
     show_repeat();
 }
 
+/* Cover or spectrum in the artwork. The rounded corners of the artwork clip its children
+ * (clip_corner): LVGL then draws every change through a layer, which cost about 40 % of a core with
+ * the bars moving 25 times a second. The spectrum has its own rounded background and its bars stay
+ * inside its padding, so the clip is off while it shows. */
+void show_viz_mode()
+{
+    lv_obj_set_style_clip_corner(s_art, !s_show_viz, 0);
+    if (s_show_viz) {
+        spectrum::view_clear(s_viz_view);
+        lv_obj_remove_flag(s_viz, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_art_content, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_viz, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_art_content, LV_OBJ_FLAG_HIDDEN);
+        s_viz_feed = false;
+    }
+}
+
+/* A tap on the artwork: the cover (or its placeholder) or the spectrum; remembered */
+void on_art(lv_event_t *)
+{
+    s_show_viz = !s_show_viz;
+    phone_pref_set("mus_viz", s_show_viz ? 1 : 0);
+    show_viz_mode();
+}
+
+/* About 25 times a second: the bars while they are on the screen, and the mute badge */
+void on_viz_timer(lv_timer_t *)
+{
+    if (!s_root) {
+        return;
+    }
+    /* not under the quick settings panel either: it covers the artwork, and each bar change would
+     * redraw the panel over it */
+    const bool on_screen = lv_obj_get_screen(s_root) == lv_screen_active() && !phone_lock_is_locked() &&
+                           !phone_quick_visible();
+    const bool muted = phone_audio_get_volume() == 0;
+    s_viz_feed = s_show_viz && on_screen && s_playing && !s_paused && !muted;
+    if (s_show_viz && on_screen) {
+        spectrum::view_update(s_viz_view);
+    }
+    /* muted: a dark disc with a crossed speaker, breathing (2.4 s, from full to 15 %), over the cover
+     * or the bars */
+    if (muted != !lv_obj_has_flag(s_mute_badge, LV_OBJ_FLAG_HIDDEN)) {
+        if (muted) {
+            lv_obj_remove_flag(s_mute_badge, LV_OBJ_FLAG_HIDDEN);
+            s_mute_since = lv_tick_get();
+        } else {
+            lv_obj_add_flag(s_mute_badge, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    if (muted && on_screen) {
+        const uint32_t phase = lv_tick_elaps(s_mute_since) % 2400;
+        const uint32_t fade = phase <= 1200 ? phase : 2400 - phase;
+        lv_obj_set_style_image_opa(s_mute_icon, static_cast<lv_opa_t>(LV_OPA_COVER - fade * 215 / 1200), 0);
+    }
+}
+
 void on_scroll(lv_event_t *e)
 {
     if (s_lib) {
@@ -1363,28 +1435,65 @@ void build_ui()
     lv_obj_set_style_bg_opa(s_art, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_grad_dir(s_art, LV_GRAD_DIR_VER, 0);
     lv_obj_remove_flag(s_art, LV_OBJ_FLAG_SCROLLABLE);
-    s_art_primary = lv_obj_create(s_art);
+    /* discs, note and cover in one layer, hidden as a whole while the spectrum shows: the artwork
+     * does not clip then, and their square corners would show around the spectrum */
+    s_art_content = lv_obj_create(s_art);
+    lv_obj_remove_style_all(s_art_content);
+    lv_obj_set_size(s_art_content, LV_PCT(100), LV_PCT(100));
+    lv_obj_remove_flag(s_art_content, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    s_art_primary = lv_obj_create(s_art_content);
     lv_obj_remove_style_all(s_art_primary);
     lv_obj_set_size(s_art_primary, ART * 70 / 100, ART * 70 / 100);
     lv_obj_set_pos(s_art_primary, -ART * 17 / 100, ART * 52 / 100);
     lv_obj_set_style_radius(s_art_primary, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_art_primary, LV_OPA_70, 0);
-    s_art_secondary = lv_obj_create(s_art);
+    lv_obj_remove_flag(s_art_primary, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    s_art_secondary = lv_obj_create(s_art_content);
     lv_obj_remove_style_all(s_art_secondary);
     lv_obj_set_size(s_art_secondary, ART * 56 / 100, ART * 56 / 100);
     lv_obj_set_pos(s_art_secondary, ART * 59 / 100, -ART * 14 / 100);
     lv_obj_set_style_radius(s_art_secondary, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(s_art_secondary, LV_OPA_60, 0);
-    lv_obj_t *note = lv_label_create(s_art);
+    lv_obj_remove_flag(s_art_secondary, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    lv_obj_t *note = lv_label_create(s_art_content);
     lv_obj_set_style_text_font(note, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_opa(note, LV_OPA_80, 0);
     lv_label_set_text(note, LV_SYMBOL_AUDIO);
     lv_obj_align(note, LV_ALIGN_BOTTOM_RIGHT, -14, -10);
     set_artwork(PALETTE_IDLE);
     /* the cover of the tag, over the placeholder */
-    s_cover_img = lv_image_create(s_art);
+    s_cover_img = lv_image_create(s_art_content);
     lv_obj_center(s_cover_img);
     lv_obj_add_flag(s_cover_img, LV_OBJ_FLAG_HIDDEN);
+
+    /* the spectrum, over the cover; a tap on the artwork switches between them */
+    s_viz = lv_obj_create(s_art);
+    lv_obj_remove_style_all(s_viz);
+    lv_obj_set_size(s_viz, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(s_viz, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_viz, lv_color_hex(0x171C24), 0);
+    lv_obj_set_style_radius(s_viz, 22, 0);      /* same corners as the artwork, without clipping */
+    lv_obj_set_style_pad_hor(s_viz, 12, 0);
+    lv_obj_set_style_pad_ver(s_viz, 14, 0);
+    lv_obj_remove_flag(s_viz, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    spectrum::view_create(s_viz_view, s_viz, 3, 4, 3);
+    s_show_viz = phone_pref_get("mus_viz", 0) != 0;
+    show_viz_mode();
+    lv_obj_add_flag(s_art, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_art, on_art, LV_EVENT_SHORT_CLICKED, nullptr);
+
+    /* mute badge, over everything in the artwork (shown only, a tap still switches the view) */
+    s_mute_badge = lv_obj_create(s_art);
+    lv_obj_remove_style_all(s_mute_badge);
+    lv_obj_set_size(s_mute_badge, 72, 72);
+    lv_obj_center(s_mute_badge);
+    lv_obj_set_style_radius(s_mute_badge, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_mute_badge, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_mute_badge, LV_OPA_70, 0);
+    lv_obj_remove_flag(s_mute_badge, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+    lv_obj_add_flag(s_mute_badge, LV_OBJ_FLAG_HIDDEN);
+    s_mute_icon = phone_ui_mute_icon(s_mute_badge, 48, lv_color_white());   /* crossed speaker */
+    lv_obj_center(s_mute_icon);
 
     s_title = lv_label_create(card);
     lv_obj_set_style_text_font(s_title, phone_font_by_size(24), 0);
@@ -1559,6 +1668,7 @@ bool PhoneMusic::run()
     s_cover_ready = COVER_NONE;
     build_ui();
     lv_timer_create(on_timer, 250, nullptr);
+    lv_timer_create(on_viz_timer, 40, nullptr);
     return true;
 }
 
@@ -1570,6 +1680,7 @@ bool PhoneMusic::back()
 /* Leaving to the home screen keeps the music playing; closing the app stops it */
 bool PhoneMusic::close()
 {
+    s_viz_feed = false;
     end_player();
     retire_library();
     phone_storage_release(s_hold_name);

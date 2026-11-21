@@ -11,3 +11,10 @@ class Phone;
  * lock screen. Call once, with the LVGL lock held, after the phone has begun.
  */
 void phone_quick_start(esp_brookesia::systems::phone::Phone *phone);
+
+/**
+ * True while the panel is out or being dragged (LVGL task). It covers the top 376 px: apps that
+ * animate there (spectrum bars) skip their updates meanwhile, since each change makes LVGL redraw the
+ * panel and the dimmed shade over it (about +20 % of a core at 25 updates a second).
+ */
+bool phone_quick_visible(void);

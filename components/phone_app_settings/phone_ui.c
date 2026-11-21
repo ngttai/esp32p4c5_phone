@@ -1,5 +1,17 @@
 #include "phone_ui.h"
 
+lv_obj_t *phone_ui_mute_icon(lv_obj_t *parent, int size, lv_color_t color)
+{
+    lv_obj_t *img = lv_image_create(parent);
+    lv_image_set_src(img, &phone_icon_mute);
+    lv_image_set_scale(img, (uint32_t)(size * LV_SCALE_NONE / 48));
+    lv_image_set_inner_align(img, LV_IMAGE_ALIGN_CENTER);
+    lv_obj_set_size(img, size, size);
+    lv_obj_set_style_image_recolor(img, color, 0);
+    lv_obj_set_style_image_recolor_opa(img, LV_OPA_COVER, 0);
+    return img;
+}
+
 void phone_ui_scrollbar(lv_obj_t *obj)
 {
     lv_obj_set_scrollbar_mode(obj, LV_SCROLLBAR_MODE_ACTIVE);

@@ -6,8 +6,6 @@
 
 namespace radio {
 
-constexpr int BAR_COUNT = 12;
-
 enum class Status {
     STOPPED,
     CONNECTING,
@@ -19,7 +17,7 @@ enum class Status {
 /**
  * HLS internet radio through the GMF simple player (port of the radio of MetalioClaw4): playlist and
  * segments over HTTP(S) with the certificate bundle, AAC/MP3/TS segments, played at the stream rate
- * on the speaker (mixed to mono), and a 12-band spectrum of the sound. All calls return at once; none
+ * on the speaker (mixed to mono); the sound feeds the shared spectrum (phone_spectrum). All calls return at once; none
  * takes the LVGL lock.
  */
 void play(const std::string &url);     // start, or switch to another station
@@ -28,7 +26,6 @@ void shutdown();                       // give the speaker back, stop and end th
 Status status();
 bool busy_speaker();                   // the last FAILED was a busy speaker (another app plays)
 void format(char *buf, size_t len);    // "AAC · 48 kHz stereo", empty before the first sound
-void bars(uint8_t out[BAR_COUNT]);     // 0..255 per band
 void title(char *buf, size_t len);     // song of an Icecast stream (ICY StreamTitle), empty if none
 
 } // namespace radio
