@@ -127,3 +127,6 @@ CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN=n
 
 # Wake word "Hi ESP" (WakeNet 9), model in the "model" partition
 CONFIG_SR_WN_WN9_HIESP=y
+
+# 4G data (PLAN_4G.md stage 2): PPP over the ML307C UART through esp_modem
+CONFIG_LWIP_PPP_SUPPORT=y

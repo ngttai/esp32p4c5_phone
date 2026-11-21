@@ -1,0 +1,3 @@
+dependencies:
+  # 4G data: PPP (and CMUX) over the UART of the ML307C modem
+  espressif/esp_modem: "*"

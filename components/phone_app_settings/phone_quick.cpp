@@ -51,6 +51,8 @@ lv_obj_t *s_mute_icon;
 lv_obj_t *s_mute_sub;
 lv_obj_t *s_cell_tile;
 lv_obj_t *s_cell_sub;
+lv_obj_t *s_cdata_tile;
+lv_obj_t *s_cdata_sub;
 lv_obj_t *s_bri;
 lv_obj_t *s_vol;
 lv_timer_t *s_timer;
@@ -156,6 +158,13 @@ void refresh(lv_timer_t *)
         lv_label_set_text(s_cell_sub, phone_cell_state_text(cell ? ci.state : PHONE_CELL_OFF));
     }
 
+    /* Mobile data: dim while 4G is off */
+    const bool cdata = phone_cell_data_enabled();
+    lv_obj_set_style_bg_color(s_cdata_tile, lv_color_hex(cell && cdata ? COLOR_TILE_ON : COLOR_TILE), 0);
+    lv_obj_set_style_opa(s_cdata_tile, cell ? LV_OPA_COVER : LV_OPA_50, 0);
+    lv_label_set_text(s_cdata_sub, !cell ? T("Cần bật 4G", "Turn 4G on") : !cdata ? T("Tắt", "Off")
+                      : phone_cell_data_text(ci.data));
+
     /* Mute and the sliders follow the volume keys and Settings */
     const bool muted = phone_pref_get("mute", 0) != 0;
     lv_obj_set_style_bg_color(s_mute_tile, lv_color_hex(muted ? COLOR_TILE_ON : COLOR_TILE), 0);
@@ -220,6 +229,18 @@ void on_cell(lv_event_t *e)
         return;
     }
     phone_cell_set_enabled(!phone_cell_is_enabled());
+    refresh(nullptr);
+}
+
+void on_cdata(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_LONG_PRESSED) {
+        open_settings(Open::CELL);
+        return;
+    }
+    if (phone_cell_is_enabled()) {
+        phone_cell_set_data(!phone_cell_data_enabled());
+    }
     refresh(nullptr);
 }
 
@@ -464,6 +485,8 @@ void build()
     s_wifi_tile = make_tile(s_panel, 20, LV_SYMBOL_WIFI, "Wi-Fi", nullptr, &s_wifi_sub, on_wifi, true);
     s_mute_tile = make_tile(s_panel, 246, LV_SYMBOL_MUTE, T("Im lặng", "Silent"), &s_mute_icon, &s_mute_sub, on_mute, false);
     s_cell_tile = make_tile(s_panel, 20, "4G", T("Di động", "Mobile"), nullptr, &s_cell_sub, on_cell, true, TILE2_Y);
+    s_cdata_tile = make_tile(s_panel, 246, LV_SYMBOL_DOWNLOAD, T("Dữ liệu di động", "Mobile data"), nullptr, &s_cdata_sub, on_cdata,
+                             true, TILE2_Y);
 
     s_bri = make_slider(s_panel, SLIDER_Y, nullptr, BRI_MIN, on_bri);
     draw_sun(s_bri);

@@ -3,10 +3,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "driver/uart.h"
+#include "esp_event.h"
+#include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_modem_api.h"
+#include "esp_netif.h"
+#include "esp_netif_ppp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 #include "bsp/esp-bsp.h"
 #include "phone_locale.h"
 
@@ -18,32 +25,51 @@ namespace {
 constexpr uint32_t POLL_SEARCH_MS = 5000;       // until registered
 constexpr uint32_t POLL_MS = 15000;             // registered
 constexpr uint32_t RETRY_NO_ANSWER_MS = 60000;  // power again after a module that did not answer
+constexpr uint32_t BOOT_MS = 15000;             // first "AT" answer after power-on (4.7 s measured)
+constexpr uint32_t DATA_RETRY_MS = 20000;       // after a PPP that did not come up
+constexpr uint32_t PPP_UP_MS = 30000;           // IP from PPP after the dial
+constexpr int BAUD_BOOT = 115200;
+constexpr int BAUD_FAST = 921600;               // stage 0: 300/300 "AT" through the level shifter
 
 TaskHandle_t s_task;
 std::atomic<bool> s_want;
+std::atomic<bool> s_want_data;
 std::atomic<bool> s_powered;
 SemaphoreHandle_t s_lock;
 phone_cell_info_t s_info;
 phone_cell_state_t s_logged_state = PHONE_CELL_OFF;
 int s_logged_bars = -1;
+phone_cell_data_t s_logged_data = PHONE_CELL_DATA_OFF;
 
-/* One log line when the state or the bars change (task only) */
+esp_netif_t *s_ppp;                 // created once
+esp_modem_dce_t *s_dce;             // while the modem is powered
+esp_modem_dce_mode_t s_mode = ESP_MODEM_MODE_COMMAND;
+int s_baud = BAUD_BOOT;
+std::atomic<bool> s_ppp_up;
+std::atomic<bool> s_ppp_lost;
+int64_t s_data_retry_at;
+
+const uart_port_t PORT = static_cast<uart_port_t>(CONFIG_BSP_MODEM_UART_NUM);
+
+/* ---- info ---- */
+
 void log_change()
 {
     phone_cell_info_t i;
     xSemaphoreTake(s_lock, portMAX_DELAY);
     i = s_info;
     xSemaphoreGive(s_lock);
-    if (i.state == s_logged_state && i.bars == s_logged_bars) {
+    if (i.state == s_logged_state && i.bars == s_logged_bars && i.data == s_logged_data) {
         return;
     }
     s_logged_state = i.state;
     s_logged_bars = i.bars;
+    s_logged_data = i.data;
     if (i.state == PHONE_CELL_REGISTERED) {
-        ESP_LOGI(TAG, "registered %s%s %s, %d dBm, %d/4, APN %s, IP %s", i.oper, i.roaming ? " (roaming)" : "", i.act,
-                 i.rssi_dbm, i.bars, i.apn, i.ip);
+        ESP_LOGI(TAG, "registered %s%s %s, %d dBm, %d/4, APN %s, IP %s; data %d %s %s", i.oper, i.roaming ? " (roaming)" : "",
+                 i.act, i.rssi_dbm, i.bars, i.apn, i.ip, static_cast<int>(i.data), i.data_ip, i.link);
     } else {
-        ESP_LOGI(TAG, "state %d", static_cast<int>(i.state));
+        ESP_LOGI(TAG, "state %d, data %d", static_cast<int>(i.state), static_cast<int>(i.data));
     }
 }
 
@@ -58,10 +84,30 @@ void set_state(phone_cell_state_t st)
     xSemaphoreGive(s_lock);
 }
 
-/* One AT command; the answer without echo and final OK */
+void set_data(phone_cell_data_t d, const char *ip = nullptr)
+{
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_info.data = d;
+    strlcpy(s_info.data_ip, ip ? ip : "", sizeof(s_info.data_ip));
+    if (d == PHONE_CELL_DATA_OFF || d == PHONE_CELL_DATA_WAITING) {
+        s_info.link[0] = '\0';
+    }
+    xSemaphoreGive(s_lock);
+}
+
+/* ---- AT through esp_modem ---- */
+
+/* An AT command in command or CMUX mode; the answer as esp_modem returns it (lines without the OK) */
 bool at(const char *cmd, char *resp, size_t len, uint32_t timeout_ms = 2000)
 {
-    return bsp_modem_at(cmd, resp, len, timeout_ms) == ESP_OK;
+    char out[CONFIG_ESP_MODEM_C_API_STR_MAX + 1] = "";
+    resp[0] = '\0';
+    if (!s_dce || s_mode == ESP_MODEM_MODE_DATA) {
+        return false;           /* the UART carries PPP only */
+    }
+    const bool ok = esp_modem_at(s_dce, cmd, out, timeout_ms) == ESP_OK;
+    strlcpy(resp, out, len);
+    return ok;
 }
 
 /* The text after "<tag>" on its line (tag like "+CEREG:"), or the first non-empty line when tag is null */
@@ -129,6 +175,22 @@ const char *operator_name(const char *mccmnc)
     return mccmnc;
 }
 
+/* APN by operator when the network gives none (values from the usual settings, not checked on every SIM) */
+const char *operator_apn(const char *mccmnc)
+{
+    static const struct {
+        const char *code, *apn;
+    } table[] = {
+        {"45204", "v-internet"}, {"45202", "m3-world"}, {"45201", "m-wap"}, {"45205", "internet"},
+    };
+    for (const auto &t : table) {
+        if (strcmp(mccmnc, t.code) == 0) {
+            return t.apn;
+        }
+    }
+    return "";
+}
+
 const char *act_name(int act)
 {
     switch (act) {
@@ -139,6 +201,183 @@ const char *act_name(int act)
     default: return "";
     }
 }
+
+/* ---- modem power and link ---- */
+
+void on_ip_event(void *, esp_event_base_t, int32_t id, void *data)
+{
+    if (id == IP_EVENT_PPP_GOT_IP) {
+        auto *ev = static_cast<ip_event_got_ip_t *>(data);
+        char ip[40];
+        snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ev->ip_info.ip));
+        ESP_LOGI(TAG, "PPP up: %s", ip);
+        set_data(PHONE_CELL_DATA_UP, ip);
+        s_ppp_up = true;
+    } else if (id == IP_EVENT_PPP_LOST_IP) {
+        ESP_LOGW(TAG, "PPP lost its address");
+        s_ppp_up = false;
+        s_ppp_lost = true;
+    }
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+void on_terminal_error(esp_modem_terminal_error_t err)
+{
+    ESP_LOGW(TAG, "terminal error %d", static_cast<int>(err));
+}
+
+bool sync_at(int baud, int tries)
+{
+    uart_set_baudrate(PORT, baud);
+    for (int i = 0; i < tries; i++) {
+        if (esp_modem_sync(s_dce) == ESP_OK) {
+            s_baud = baud;
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    return false;
+}
+
+/* Power the module and open the esp_modem link in command mode; false when it never answers */
+bool power_on()
+{
+    if (!s_ppp) {
+        esp_netif_config_t cfg = ESP_NETIF_DEFAULT_PPP();
+        s_ppp = esp_netif_new(&cfg);
+        esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, on_ip_event, nullptr);
+        esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_LOST_IP, on_ip_event, nullptr);
+    }
+    esp_modem_dte_config_t dte = ESP_MODEM_DTE_DEFAULT_CONFIG();
+    dte.dte_buffer_size = 2048;
+    dte.task_stack_size = 4096;
+    dte.task_priority = 6;
+    dte.uart_config.port_num = PORT;
+    dte.uart_config.baud_rate = BAUD_BOOT;
+    dte.uart_config.tx_io_num = BSP_MODEM_TX;
+    dte.uart_config.rx_io_num = BSP_MODEM_RX;
+    dte.uart_config.rts_io_num = UART_PIN_NO_CHANGE;
+    dte.uart_config.cts_io_num = UART_PIN_NO_CHANGE;
+    dte.uart_config.flow_control = ESP_MODEM_FLOW_CONTROL_NONE;
+    dte.uart_config.rx_buffer_size = 8192;          /* no RTS/CTS: room for a burst while the task is late */
+    dte.uart_config.tx_buffer_size = 2048;
+    esp_modem_dce_config_t dce = ESP_MODEM_DCE_DEFAULT_CONFIG("");
+    s_dce = esp_modem_new_dev(ESP_MODEM_DCE_GENERIC, &dte, &dce, s_ppp);
+    if (!s_dce) {
+        ESP_LOGE(TAG, "esp_modem: no DCE");
+        return false;
+    }
+    esp_modem_set_error_cb(s_dce, on_terminal_error);
+    s_mode = ESP_MODEM_MODE_COMMAND;
+    bsp_power_set(BSP_POWER_MODEM, true);
+    /* the module answers ~5 s after power-on, at 115200 or at a rate kept from before */
+    const int64_t end = esp_timer_get_time() + static_cast<int64_t>(BOOT_MS) * 1000;
+    bool ok = false;
+    while (!ok && esp_timer_get_time() < end && s_want) {
+        ok = sync_at(BAUD_BOOT, 3) || sync_at(BAUD_FAST, 2);
+    }
+    if (!ok) {
+        esp_modem_destroy(s_dce);
+        s_dce = nullptr;
+        bsp_power_set(BSP_POWER_MODEM, false);
+        return false;
+    }
+    esp_modem_set_echo(s_dce, false);
+    /* faster UART for PPP: the module switches after its OK, then the P4 side follows */
+    if (s_baud != BAUD_FAST) {
+        if (esp_modem_set_baud(s_dce, BAUD_FAST) == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            if (!sync_at(BAUD_FAST, 5)) {
+                ESP_LOGW(TAG, "no answer at %d, back to %d", BAUD_FAST, BAUD_BOOT);
+                sync_at(BAUD_BOOT, 5);
+            }
+        }
+    }
+    ESP_LOGI(TAG, "modem link at %d baud", s_baud);
+    return true;
+}
+
+void data_down()
+{
+    if (s_dce && s_mode != ESP_MODEM_MODE_COMMAND) {
+        if (esp_modem_set_mode(s_dce, ESP_MODEM_MODE_COMMAND) != ESP_OK) {
+            ESP_LOGW(TAG, "back to command mode failed");
+        }
+        s_mode = ESP_MODEM_MODE_COMMAND;
+        ESP_LOGI(TAG, "data off");
+    }
+    s_ppp_up = false;
+    s_ppp_lost = false;
+}
+
+void power_off()
+{
+    data_down();
+    if (s_dce) {
+        char resp[64];
+        if (s_baud != BAUD_BOOT) {
+            at("AT+IPR=115200", resp, sizeof(resp));  /* the BSP probe and the Debug page talk at 115200 */
+        }
+        esp_modem_destroy(s_dce);
+        s_dce = nullptr;
+    }
+    if (s_powered) {
+        bsp_power_set(BSP_POWER_MODEM, false);
+        s_powered = false;
+        ESP_LOGI(TAG, "modem off");
+    }
+    s_baud = BAUD_BOOT;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_info = {};
+    xSemaphoreGive(s_lock);
+    s_logged_state = PHONE_CELL_OFF;
+    s_logged_bars = -1;
+    s_logged_data = PHONE_CELL_DATA_OFF;
+}
+
+/* Dial: CMUX first (AT keeps working beside PPP), else plain data mode */
+void data_up()
+{
+    phone_cell_info_t i;
+    phone_cell_get(&i);
+    const char *apn = i.apn[0] ? i.apn : operator_apn(i.mccmnc);
+    set_data(PHONE_CELL_DATA_CONNECTING);
+    esp_modem_set_apn(s_dce, apn);
+    ESP_LOGI(TAG, "data: APN \"%s\", CMUX first", apn);
+    s_ppp_up = false;
+    s_ppp_lost = false;
+    esp_modem_dce_mode_t mode = ESP_MODEM_MODE_CMUX;
+    if (esp_modem_set_mode(s_dce, ESP_MODEM_MODE_CMUX) != ESP_OK) {
+        ESP_LOGW(TAG, "CMUX refused: plain data mode");
+        esp_modem_sync(s_dce);
+        mode = ESP_MODEM_MODE_DATA;
+        if (esp_modem_set_mode(s_dce, ESP_MODEM_MODE_DATA) != ESP_OK) {
+            ESP_LOGE(TAG, "data mode failed");
+            set_data(PHONE_CELL_DATA_FAILED);
+            s_data_retry_at = esp_timer_get_time() + static_cast<int64_t>(DATA_RETRY_MS) * 1000;
+            return;
+        }
+    }
+    s_mode = mode;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    snprintf(s_info.link, sizeof(s_info.link), "%s %d", mode == ESP_MODEM_MODE_CMUX ? "CMUX" : "PPP", s_baud);
+    xSemaphoreGive(s_lock);
+    /* the IP comes with IP_EVENT_PPP_GOT_IP */
+    const int64_t end = esp_timer_get_time() + static_cast<int64_t>(PPP_UP_MS) * 1000;
+    while (!s_ppp_up && esp_timer_get_time() < end && s_want && s_want_data) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(500));
+    }
+    if (!s_ppp_up) {
+        ESP_LOGW(TAG, "no IP from PPP");
+        data_down();
+        set_data(PHONE_CELL_DATA_FAILED);
+        s_data_retry_at = esp_timer_get_time() + static_cast<int64_t>(DATA_RETRY_MS) * 1000;
+    }
+}
+
+/* ---- polling ---- */
 
 void read_identity()
 {
@@ -239,23 +478,13 @@ void poll_network()
         strlcpy(s_info.mccmnc, mccmnc, sizeof(s_info.mccmnc));
         strlcpy(s_info.oper, mccmnc[0] ? operator_name(mccmnc) : "", sizeof(s_info.oper));
         strlcpy(s_info.act, act, sizeof(s_info.act));
-        strlcpy(s_info.apn, apn, sizeof(s_info.apn));
-        strlcpy(s_info.ip, ip, sizeof(s_info.ip));
+        if (apn[0]) {
+            strlcpy(s_info.apn, apn, sizeof(s_info.apn));
+        }
+        if (ip[0]) {
+            strlcpy(s_info.ip, ip, sizeof(s_info.ip));
+        }
     }
-    xSemaphoreGive(s_lock);
-}
-
-void power_off()
-{
-    if (s_powered) {
-        bsp_modem_deinit();
-        s_powered = false;
-        ESP_LOGI(TAG, "modem off");
-    }
-    s_logged_state = PHONE_CELL_OFF;
-    s_logged_bars = -1;
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_info = {};
     xSemaphoreGive(s_lock);
 }
 
@@ -267,23 +496,44 @@ void cell_task(void *)
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
-        if (!s_powered) {
+        if (!s_dce) {
             set_state(PHONE_CELL_STARTING);
             s_powered = true;                       /* the probe must not start meanwhile */
-            if (bsp_modem_init() != ESP_OK) {
+            if (!power_on()) {
                 s_powered = false;
                 set_state(PHONE_CELL_NO_ANSWER);
+                log_change();
                 ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(RETRY_NO_ANSWER_MS));
                 continue;
             }
             read_identity();
         }
+
+        /* mobile data: down when turned off or lost, up when on and registered */
+        if (s_mode != ESP_MODEM_MODE_COMMAND && (!s_want_data || s_ppp_lost)) {
+            data_down();
+            set_data(s_want_data ? PHONE_CELL_DATA_FAILED : PHONE_CELL_DATA_OFF);
+            if (s_want_data) {
+                s_data_retry_at = esp_timer_get_time() + static_cast<int64_t>(DATA_RETRY_MS) * 1000;
+            }
+        }
+
         uint32_t wait = POLL_SEARCH_MS;
-        if (poll_sim()) {
+        if (s_mode == ESP_MODEM_MODE_DATA) {
+            wait = POLL_MS;                         /* plain data mode: no AT, the last values stay */
+        } else if (poll_sim()) {
             poll_network();
             if (s_info.state == PHONE_CELL_REGISTERED) {
                 wait = POLL_MS;
+                if (s_want_data && s_mode == ESP_MODEM_MODE_COMMAND && esp_timer_get_time() >= s_data_retry_at) {
+                    data_up();
+                } else if (!s_want_data) {
+                    set_data(PHONE_CELL_DATA_OFF);
+                }
             }
+        }
+        if (s_want_data && s_info.state != PHONE_CELL_REGISTERED && s_mode == ESP_MODEM_MODE_COMMAND) {
+            set_data(PHONE_CELL_DATA_WAITING);
         }
         log_change();
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
@@ -299,7 +549,9 @@ extern "C" void phone_cell_start(void)
     }
     s_lock = xSemaphoreCreateMutex();
     s_want = phone_pref_get("cell", 0) != 0;
-    if (!s_lock || xTaskCreate(cell_task, "phone_cell", 4096, nullptr, 3, &s_task) != pdPASS) {
+    s_want_data = phone_pref_get("cdata", 0) != 0;
+    /* esp_modem and lwIP PPP: internal stack (the UART driver, no flash access) */
+    if (!s_lock || xTaskCreate(cell_task, "phone_cell", 6144, nullptr, 3, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "cannot start");
         s_task = nullptr;
     }
@@ -317,6 +569,21 @@ extern "C" void phone_cell_set_enabled(bool on)
 extern "C" bool phone_cell_is_enabled(void)
 {
     return s_want;
+}
+
+extern "C" void phone_cell_set_data(bool on)
+{
+    phone_pref_set("cdata", on ? 1 : 0);
+    s_want_data = on;
+    s_data_retry_at = 0;
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+extern "C" bool phone_cell_data_enabled(void)
+{
+    return s_want_data;
 }
 
 extern "C" bool phone_cell_busy(void)
@@ -352,6 +619,18 @@ extern "C" const char *phone_cell_state_text(phone_cell_state_t state)
     case PHONE_CELL_SEARCHING: return T("Đang tìm mạng…", "Searching…");
     case PHONE_CELL_DENIED: return T("Mạng từ chối", "Registration denied");
     case PHONE_CELL_REGISTERED: return T("Đã kết nối", "Registered");
+    }
+    return "";
+}
+
+extern "C" const char *phone_cell_data_text(phone_cell_data_t data)
+{
+    switch (data) {
+    case PHONE_CELL_DATA_OFF: return T("Tắt", "Off");
+    case PHONE_CELL_DATA_WAITING: return T("Chờ mạng…", "Waiting for the network…");
+    case PHONE_CELL_DATA_CONNECTING: return T("Đang nối…", "Connecting…");
+    case PHONE_CELL_DATA_UP: return T("Đã nối", "Connected");
+    case PHONE_CELL_DATA_FAILED: return T("Lỗi, sẽ thử lại", "Failed, trying again");
     }
     return "";
 }

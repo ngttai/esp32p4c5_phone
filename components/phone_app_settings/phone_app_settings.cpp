@@ -1231,8 +1231,10 @@ void build_speed_page(lv_obj_t *root)
 
 /* Mobile network page (Settings > Mobile network): 4G on/off and what the modem reports (stage 1 of
  * PLAN_4G.md: no data over 4G yet) */
-enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_APN, CR_IP, CR_ICCID, CR_IMSI, CR_IMEI, CR_MODEL, CR_COUNT };
+enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_DATA, CR_DATA_IP, CR_LINK, CR_APN, CR_IP, CR_ICCID, CR_IMSI, CR_IMEI, CR_MODEL,
+               CR_COUNT };
 lv_obj_t *s_cellular_sw;
+lv_obj_t *s_cdata_sw;
 lv_obj_t *s_cellular_vals[CR_COUNT];
 
 void set_text_if_changed(lv_obj_t *label, const char *text)
@@ -1255,9 +1257,27 @@ void cellular_refresh()
             lv_obj_remove_state(s_cellular_sw, LV_STATE_CHECKED);
         }
     }
+    const bool data = phone_cell_data_enabled();
+    if (lv_obj_has_state(s_cdata_sw, LV_STATE_CHECKED) != data) {
+        if (data) {
+            lv_obj_add_state(s_cdata_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_remove_state(s_cdata_sw, LV_STATE_CHECKED);
+        }
+    }
+    if (lv_obj_has_state(s_cdata_sw, LV_STATE_DISABLED) == on) {
+        if (on) {
+            lv_obj_remove_state(s_cdata_sw, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_cdata_sw, LV_STATE_DISABLED);
+        }
+    }
     phone_cell_info_t ci;
     phone_cell_get(&ci);
     char buf[96];
+    set_text_if_changed(s_cellular_vals[CR_DATA], on ? phone_cell_data_text(ci.data) : phone_cell_data_text(PHONE_CELL_DATA_OFF));
+    set_text_if_changed(s_cellular_vals[CR_DATA_IP], ci.data_ip[0] ? ci.data_ip : "--");
+    set_text_if_changed(s_cellular_vals[CR_LINK], ci.link[0] ? ci.link : "--");
     set_text_if_changed(s_cellular_vals[CR_STATE], phone_cell_state_text(on ? ci.state : PHONE_CELL_OFF));
     if (ci.oper[0]) {
         snprintf(buf, sizeof(buf), "%s%s", ci.oper, ci.roaming ? T(" (chuyển vùng)", " (roaming)") : "");
@@ -1293,19 +1313,24 @@ void build_cellular_page(lv_obj_t *root)
         phone_cell_set_enabled(lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED));
         cellular_refresh();
     });
+    s_cdata_sw = switch_row(card, T("Dữ liệu di động", "Mobile data"), phone_cell_data_enabled(), [](lv_event_t *e) {
+        phone_cell_set_data(lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED));
+        cellular_refresh();
+    });
     group_end(card);
     static const struct {
         CellRow row;
         const char *vi, *en;
     } rows[] = {
         {CR_STATE, "Trạng thái", "Status"}, {CR_OPER, "Nhà mạng", "Operator"}, {CR_SIGNAL, "Sóng", "Signal"},
-        {CR_NET, "Mạng", "Network"}, {CR_APN, "APN", "APN"}, {CR_IP, "IP", "IP"}, {CR_ICCID, "ICCID", "ICCID"},
+        {CR_NET, "Mạng", "Network"}, {CR_DATA, "Internet qua 4G", "Internet over 4G"}, {CR_DATA_IP, "IP (PPP)", "IP (PPP)"},
+        {CR_LINK, "Kênh UART", "UART link"}, {CR_APN, "APN", "APN"}, {CR_IP, "IP", "IP"}, {CR_ICCID, "ICCID", "ICCID"},
         {CR_IMSI, "IMSI", "IMSI"}, {CR_IMEI, "IMEI", "IMEI"}, {CR_MODEL, "Module", "Module"},
     };
-    const char *groups[] = {T("Trạng thái", "Status"), T("Dữ liệu (chưa dùng cho Internet)", "Data (not used for Internet yet)"),
-                            "SIM", T("Module", "Module")};
-    const int first[] = {CR_STATE, CR_APN, CR_ICCID, CR_IMEI, CR_COUNT};
-    for (int gi = 0; gi < 4; gi++) {
+    const char *groups[] = {T("Trạng thái", "Status"), T("Dữ liệu (Wi-Fi được ưu tiên)", "Data (Wi-Fi comes first)"),
+                            T("Mạng cấp", "From the network"), "SIM", T("Module", "Module")};
+    const int first[] = {CR_STATE, CR_DATA, CR_APN, CR_ICCID, CR_IMEI, CR_COUNT};
+    for (int gi = 0; gi < 5; gi++) {
         lv_obj_t *g = make_group(p, groups[gi]);
         for (int r = first[gi]; r < first[gi + 1]; r++) {
             lv_obj_t *v = kv_row(g, T(rows[r].vi, rows[r].en));
@@ -1633,6 +1658,7 @@ void build_ui()
     s_sd_text = nullptr;
     s_cell_text = nullptr;
     s_cellular_sw = nullptr;
+    s_cdata_sw = nullptr;
     memset(s_cellular_vals, 0, sizeof(s_cellular_vals));
     s_cell_shown = SIZE_MAX;
     s_kb = nullptr;
