@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS phone_app_video.cpp phone_video_icon.c
     INCLUDE_DIRS .
-    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings esp_driver_jpeg esp_driver_ppa esp_timer
+    REQUIRES brookesia_core esp32p4c5_bsp phone_app_settings esp_driver_jpeg esp_driver_ppa esp_timer espressif__esp_h264 espressif__esp_extractor espressif__esp_audio_codec esp_ringbuf
     WHOLE_ARCHIVE
 )
 

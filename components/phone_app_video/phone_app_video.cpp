@@ -1,14 +1,23 @@
 /*
- * Video app: plays Motion JPEG .avi files from the microSD card, with 16-bit PCM sound.
+ * Video app: plays videos from the microSD card.
  *
- * The ESP32-P4 has no H.264 decoder, so the video must be MJPEG: every frame is a JPEG picture,
- * decoded by the hardware JPEG decoder, then scaled (and turned, for landscape videos) by the PPA
- * into one of two buffers shown by an LVGL image. A player task walks the "movi" list of the AVI
- * file in order: video chunks are shown at the frame rate of the file (late frames are dropped),
- * audio chunks go to the speaker codec.
+ * - .avi with Motion JPEG and 16-bit PCM sound: every frame is a JPEG picture, decoded by the
+ *   hardware JPEG decoder, then scaled (and turned, for landscape videos) by the PPA into one of two
+ *   buffers shown by an LVGL image. A player task walks the "movi" list of the AVI file in order:
+ *   video chunks are shown at the frame rate of the file (late frames are dropped), audio chunks go
+ *   to the speaker codec.
+ * - .mp4 with H.264 constrained baseline and AAC sound: the ESP32-P4 has no H.264 decoder, so the
+ *   software one of esp_h264 runs on core 1 (about 20 ms a frame at 640x360, 30 ms at 800x480).
+ *   esp_extractor reads the frames; the I420 pictures are repacked for the PPA (YUV420 to RGB565,
+ *   scale, turn). AAC goes through a ring buffer to a sound task. YouTube files are mostly Main or
+ *   High profile and must be converted.
  *
  * Convert a video with ffmpeg:
- *   ffmpeg -i in.mp4 -vf scale=800:480 -r 20 -c:v mjpeg -q:v 5 -c:a pcm_s16le -ar 22050 -ac 1 out.avi
+ *   ffmpeg -i in.mp4 -vf "scale=800:480:force_original_aspect_ratio=decrease:force_divisible_by=2" -r 20
+ *          -c:v mjpeg -q:v 5 -c:a pcm_s16le -ar 22050 -ac 1 out.avi
+ *   ffmpeg -i in.mp4 -vf "scale=640:480:force_original_aspect_ratio=decrease:force_divisible_by=2"
+ *          -c:v libx264 -profile:v baseline -level 3.1 -bf 0 -g 48 -crf 23 -pix_fmt yuv420p
+ *          -c:a aac -b:a 64k -ar 22050 -ac 1 -movflags +faststart out.mp4
  */
 #include <algorithm>
 #include <atomic>
@@ -27,6 +36,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "freertos/ringbuf.h"
+#include <sys/stat.h>
+#include "esp_extractor.h"
+#include "esp_extractor_defaults.h"
+#include "esp_h264_dec.h"
+#include "esp_h264_dec_sw.h"
+#include "esp_h264_dec_param.h"
+#include "esp_aac_dec.h"
 #include "bsp/esp-bsp.h"
 #include "lvgl.h"
 #include "esp_brookesia.hpp"
@@ -485,6 +502,564 @@ done:
     vTaskDelete(nullptr);
 }
 
+/* ---- MP4: H.264 constrained baseline (software decoder) + AAC ---- */
+
+constexpr uint32_t MP4_POOL = 512 * 1024;       // extractor output pool: the largest frame must fit
+constexpr size_t MP4_AUDIO_RING = 64 * 1024;    // AAC packets waiting for the sound task (several seconds)
+constexpr int MP4_BAD_FRAMES = 30;              // frames in a row without a picture: not a stream we can decode
+
+int mp4_read(void *buf, uint32_t size, void *ctx)
+{
+    return static_cast<int>(fread(buf, 1, size, static_cast<FILE *>(ctx)));
+}
+
+int mp4_seek(uint32_t pos, void *ctx)
+{
+    return fseek(static_cast<FILE *>(ctx), pos, SEEK_SET) == 0 ? 0 : -1;
+}
+
+uint32_t mp4_size(void *ctx)
+{
+    struct stat st;
+    return fstat(fileno(static_cast<FILE *>(ctx)), &st) == 0 ? static_cast<uint32_t>(st.st_size) : 0;
+}
+
+bool is_annex_b(const uint8_t *b, size_t n)
+{
+    return (n >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 1) || (n >= 3 && b[0] == 0 && b[1] == 0 && b[2] == 1);
+}
+
+/* SPS and PPS of an avcC box as Annex B; returns the size written */
+size_t avcc_header(const uint8_t *c, size_t n, uint8_t *out, size_t cap)
+{
+    if (n < 7 || c[0] != 1) {
+        return 0;
+    }
+    size_t w = 0, p = 5;
+    for (int list = 0; list < 2 && p < n; list++) {
+        const int count = list == 0 ? (c[p] & 0x1F) : c[p];
+        p++;
+        for (int i = 0; i < count && p + 2 <= n; i++) {
+            const size_t len = (c[p] << 8) | c[p + 1];
+            p += 2;
+            if (p + len > n || w + 4 + len > cap) {
+                return w;
+            }
+            static const uint8_t start[4] = {0, 0, 0, 1};
+            memcpy(out + w, start, 4);
+            memcpy(out + w + 4, c + p, len);
+            w += 4 + len;
+            p += len;
+        }
+    }
+    return w;
+}
+
+/* 4-byte NAL lengths turned into start codes, in place */
+void avcc_to_annex_b(uint8_t *b, size_t n)
+{
+    for (size_t p = 0; p + 4 <= n;) {
+        const size_t len = (static_cast<size_t>(b[p]) << 24) | (b[p + 1] << 16) | (b[p + 2] << 8) | b[p + 3];
+        b[p] = b[p + 1] = b[p + 2] = 0;
+        b[p + 3] = 1;
+        p += 4 + len;
+    }
+}
+
+/* I420 (planes Y, U, V) to the YUV420 of the PPA (lines "U Y Y ..." and "V Y Y ..."). w and h even;
+ * `stride` is the width of the decoded picture. */
+void i420_to_ppa(const uint8_t *src, int stride, int stride_h, int w, int h, uint8_t *dst)
+{
+    const uint8_t *py = src;
+    const uint8_t *pu = src + stride * stride_h;
+    const uint8_t *pv = pu + (stride / 2) * (stride_h / 2);
+    const int line = w * 3 / 2;
+    for (int k = 0; k < h / 2; k++) {
+        const uint8_t *y0 = py + 2 * k * stride;
+        const uint8_t *y1 = y0 + stride;
+        const uint8_t *u = pu + k * (stride / 2);
+        const uint8_t *v = pv + k * (stride / 2);
+        uint8_t *o0 = dst + 2 * k * line;
+        uint8_t *o1 = o0 + line;
+        for (int x = 0; x < w / 2; x++) {
+            o0[0] = u[x];
+            o0[1] = y0[0];
+            o0[2] = y0[1];
+            o1[0] = v[x];
+            o1[1] = y1[0];
+            o1[2] = y1[1];
+            o0 += 3;
+            o1 += 3;
+            y0 += 2;
+            y1 += 2;
+        }
+    }
+}
+
+/* Sound of an MP4: the player task sends AAC packets (a generation number first, so a jump drops the
+ * old ones); this task decodes them and plays them, paced by the speaker */
+struct Mp4Sound {
+    RingbufHandle_t ring;
+    esp_codec_dev_handle_t spk;
+    uint32_t rate;
+    uint8_t channels;
+    std::atomic<uint32_t> gen;
+    std::atomic<bool> quit;
+    SemaphoreHandle_t done;
+};
+
+void mp4_sound_task(void *arg)
+{
+    auto *snd = static_cast<Mp4Sound *>(arg);
+    void *dec = nullptr;
+    bool dec_failed = false;
+    uint32_t pcm_size = 8192;
+    auto *pcm = static_cast<uint8_t *>(malloc(pcm_size));
+    uint32_t gen_seen = 0, open_rate = 0;
+    int volume = -1;
+    while (!snd->quit) {
+        if (s_paused || phone_lock_is_locked()) {
+            vTaskDelay(pdMS_TO_TICKS(40));
+            continue;
+        }
+        size_t n = 0;
+        auto *item = static_cast<uint8_t *>(xRingbufferReceive(snd->ring, &n, pdMS_TO_TICKS(40)));
+        if (!item) {
+            continue;
+        }
+        uint32_t gen;
+        memcpy(&gen, item, 4);
+        if (!dec && !dec_failed && n > 6) {
+            /* esp_extractor puts an ADTS header on the AAC frames of an MP4; raw frames need the format */
+            esp_aac_dec_cfg_t cfg = {};
+            cfg.sample_rate = static_cast<int32_t>(snd->rate);
+            cfg.channel = snd->channels;
+            cfg.bits_per_sample = 16;
+            cfg.no_adts_header = !(item[4] == 0xFF && (item[5] & 0xF0) == 0xF0);
+            cfg.aac_plus_enable = true;
+            if (esp_aac_dec_open(&cfg, sizeof(cfg), &dec) != ESP_AUDIO_ERR_OK) {
+                ESP_LOGE(TAG, "AAC decoder");
+                dec = nullptr;
+                dec_failed = true;
+            } else {
+                ESP_LOGI(TAG, "AAC %s ADTS header", cfg.no_adts_header ? "without" : "with");
+            }
+        }
+        if (gen == snd->gen && dec && pcm && n > 4) {
+            if (gen != gen_seen) {
+                esp_aac_dec_reset(dec);
+                gen_seen = gen;
+            }
+            esp_audio_dec_in_raw_t in = {};
+            in.buffer = item + 4;
+            in.len = n - 4;
+            while (in.len) {
+                esp_audio_dec_out_frame_t out = {};
+                out.buffer = pcm;
+                out.len = pcm_size;
+                esp_audio_dec_info_t info = {};
+                const esp_audio_err_t ret = esp_aac_dec_decode(dec, &in, &out, &info);
+                if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH && out.needed_size > pcm_size) {
+                    auto *bigger = static_cast<uint8_t *>(realloc(pcm, out.needed_size));
+                    if (!bigger) {
+                        break;
+                    }
+                    pcm = bigger;
+                    pcm_size = out.needed_size;
+                    continue;
+                }
+                if (ret != ESP_AUDIO_ERR_OK) {
+                    break;
+                }
+                if (out.decoded_size && info.sample_rate && info.channel) {
+                    if (info.sample_rate != open_rate) {
+                        /* the rate of the stream (AAC-Plus doubles the one of the file) */
+                        if (open_rate) {
+                            esp_codec_dev_close(snd->spk);
+                        }
+                        esp_codec_dev_sample_info_t fs = {};
+                        fs.sample_rate = info.sample_rate;
+                        fs.channel = 1;
+                        fs.bits_per_sample = 16;
+                        open_rate = esp_codec_dev_open(snd->spk, &fs) == ESP_CODEC_DEV_OK ? info.sample_rate : 0;
+                        volume = -1;
+                    }
+                    auto *s = reinterpret_cast<int16_t *>(pcm);
+                    const size_t frames = out.decoded_size / 2 / info.channel;
+                    if (info.channel == 2) {
+                        for (size_t i = 0; i < frames; i++) {
+                            s[i] = static_cast<int16_t>((s[2 * i] + s[2 * i + 1]) / 2);
+                        }
+                    }
+                    const int v = phone_audio_get_volume();
+                    if (v != volume && open_rate) {
+                        volume = v;
+                        esp_codec_dev_set_out_vol(snd->spk, v);
+                    }
+                    if (open_rate) {
+                        esp_codec_dev_write(snd->spk, s, frames * 2);
+                    }
+                }
+                if (!in.consumed) {
+                    break;
+                }
+                in.buffer += in.consumed;
+                in.len -= in.consumed;
+            }
+        }
+        vRingbufferReturnItem(snd->ring, item);
+    }
+    if (open_rate) {
+        esp_codec_dev_close(snd->spk);
+    }
+    if (dec) {
+        esp_aac_dec_close(dec);
+    }
+    free(pcm);
+    xSemaphoreGive(snd->done);
+    vTaskDeleteWithCaps(nullptr);
+}
+
+void mp4_player_task(void *)
+{
+    FILE *f = nullptr;
+    esp_extractor_handle_t ex = nullptr;
+    esp_h264_dec_handle_t dec = nullptr;
+    ppa_client_handle_t ppa = nullptr;
+    Mp4Sound snd = {};
+    bool snd_running = false;
+    uint8_t *in = nullptr, *yuv = nullptr;
+    size_t in_cap = 0, yuv_size = 0;
+    uint8_t head[256];
+    size_t head_len = 0;
+    bool need_head = true, annex_b = true, first_frame = true;
+    bool resync = true;             // the clock follows the next picture (start, jump)
+    bool step_one = false;          // a jump while paused: show its first picture, then hold
+    int dec_w = 0, dec_h = 0, pic_w = 0, pic_h = 0, out_w = 0, out_h = 0, steps = 16;
+    bool turned = false;
+    int back = 0, bad_frames = 0;
+    uint32_t upf = 40000;
+    uint32_t duration_ms = 0;
+    int64_t start_us = 0;
+    uint32_t pictures = 0, dropped = 0;
+    int64_t t_dec = 0;
+    bool ok = false;
+    const ppa_client_config_t ppa_cfg = {.oper_type = PPA_OPERATION_SRM};
+    esp_extractor_stream_info_t vinfo = {}, ainfo = {};
+    uint16_t audio_streams = 0;
+
+    static bool registered;
+    if (!registered) {
+        esp_mp4_extractor_register();
+        registered = true;
+    }
+    f = fopen(s_path.c_str(), "rb");
+    if (!f) {
+        goto done;
+    }
+    setvbuf(f, nullptr, _IOFBF, 32 * 1024);
+    {
+        esp_extractor_config_t cfg = {};
+        cfg.type = ESP_EXTRACTOR_TYPE_MP4;
+        cfg.extract_mask = ESP_EXTRACT_MASK_AV;
+        cfg.in_read_cb = mp4_read;
+        cfg.in_seek_cb = mp4_seek;
+        cfg.in_size_cb = mp4_size;
+        cfg.in_ctx = f;
+        cfg.out_pool_size = MP4_POOL;
+        cfg.out_align = 128;
+        if (esp_extractor_open(&cfg, &ex) != ESP_EXTRACTOR_ERR_OK || esp_extractor_parse_stream(ex) != ESP_EXTRACTOR_ERR_OK ||
+                esp_extractor_get_stream_info(ex, ESP_EXTRACTOR_STREAM_TYPE_VIDEO, 0, &vinfo) != ESP_EXTRACTOR_ERR_OK ||
+                vinfo.video_info.format != ESP_EXTRACTOR_VIDEO_FORMAT_H264) {
+            ESP_LOGE(TAG, "%s: no H.264 video", s_path.c_str());
+            goto done;
+        }
+    }
+    if (esp_extractor_get_stream_num(ex, ESP_EXTRACTOR_STREAM_TYPE_AUDIO, &audio_streams) == ESP_EXTRACTOR_ERR_OK &&
+            audio_streams > 0) {
+        esp_extractor_get_stream_info(ex, ESP_EXTRACTOR_STREAM_TYPE_AUDIO, 0, &ainfo);
+    }
+    upf = vinfo.video_info.fps ? 1000000u / vinfo.video_info.fps : 40000u;
+    duration_ms = vinfo.duration;
+    s_usec_per_frame = upf;
+    s_total = static_cast<uint32_t>(static_cast<uint64_t>(duration_ms) * 1000 / upf);
+    ESP_LOGI(TAG, "%s: H.264 %ux%u %u fps, %u ms, audio %.4s %u Hz %u ch", s_path.c_str(), vinfo.video_info.width,
+             vinfo.video_info.height, vinfo.video_info.fps, static_cast<unsigned>(duration_ms),
+             audio_streams ? reinterpret_cast<const char *>(&ainfo.audio_info.format) : "none",
+             static_cast<unsigned>(ainfo.audio_info.sample_rate), ainfo.audio_info.channel);
+    if (vinfo.spec_info && vinfo.spec_info_len) {
+        if (is_annex_b(vinfo.spec_info, vinfo.spec_info_len)) {
+            head_len = std::min<size_t>(vinfo.spec_info_len, sizeof(head));
+            memcpy(head, vinfo.spec_info, head_len);
+        } else {
+            head_len = avcc_header(vinfo.spec_info, vinfo.spec_info_len, head, sizeof(head));
+        }
+    }
+    {
+        esp_h264_dec_cfg_sw_t dcfg = {};
+        dcfg.pic_type = ESP_H264_RAW_FMT_I420;
+        if (esp_h264_dec_sw_new(&dcfg, &dec) != ESP_H264_ERR_OK || esp_h264_dec_open(dec) != ESP_H264_ERR_OK ||
+                ppa_register_client(&ppa_cfg, &ppa) != ESP_OK) {
+            goto done;
+        }
+    }
+
+    /* sound: AAC only; the speaker may be busy (music) */
+    if (audio_streams && ainfo.audio_info.format == ESP_EXTRACTOR_AUDIO_FORMAT_AAC && ainfo.audio_info.sample_rate &&
+            (ainfo.audio_info.channel == 1 || ainfo.audio_info.channel == 2)) {
+        snd.spk = static_cast<esp_codec_dev_handle_t>(phone_audio_speaker_take());
+        if (snd.spk) {
+            snd.rate = ainfo.audio_info.sample_rate;
+            snd.channels = ainfo.audio_info.channel;
+            snd.ring = xRingbufferCreateWithCaps(MP4_AUDIO_RING, RINGBUF_TYPE_NOSPLIT, MALLOC_CAP_SPIRAM);
+            snd.done = xSemaphoreCreateBinary();
+            snd_running = snd.ring && snd.done &&
+                          xTaskCreatePinnedToCoreWithCaps(mp4_sound_task, "mp4_sound", 8192, &snd, 5, nullptr, 0,
+                                                          MALLOC_CAP_SPIRAM) == pdPASS;
+            if (!snd_running) {
+                ESP_LOGE(TAG, "no sound task");
+            }
+        }
+    }
+    if (!snd_running) {
+        esp_extractor_enable_stream(ex, ESP_EXTRACTOR_STREAM_TYPE_AUDIO, 0, false);
+    }
+
+    ok = true;
+    s_state = ST_PLAYING;
+    while (!s_stop) {
+        const int seek = s_seek.exchange(-1);
+        if (seek >= 0) {
+            /* the extractor starts again at the key frame at or before the time */
+            const uint32_t t = static_cast<uint32_t>(static_cast<uint64_t>(duration_ms) * seek / 1000);
+            if (esp_extractor_seek(ex, t) == ESP_EXTRACTOR_ERR_OK) {
+                snd.gen++;
+                resync = true;
+                need_head = true;
+                step_one = s_paused;
+                s_frame = static_cast<uint32_t>(static_cast<uint64_t>(t) * 1000 / upf);
+            }
+        }
+        if ((s_paused && !step_one) || phone_lock_is_locked()) {
+            /* hold the clock while paused or while the lock screen is up */
+            const int64_t t0 = esp_timer_get_time();
+            vTaskDelay(pdMS_TO_TICKS(40));
+            start_us += esp_timer_get_time() - t0;
+            continue;
+        }
+        esp_extractor_frame_info_t fr = {};
+        const int ret = esp_extractor_read_frame(ex, &fr);
+        if (ret == ESP_EXTRACTOR_ERR_SKIPPED || ret == ESP_EXTRACTOR_ERR_WAITING_OUTPUT) {
+            continue;
+        }
+        if (ret != ESP_EXTRACTOR_ERR_OK) {
+            if (ret != ESP_EXTRACTOR_ERR_EOS) {
+                ESP_LOGE(TAG, "read frame: %d", ret);
+            }
+            break;
+        }
+        if (fr.stream_type == ESP_EXTRACTOR_STREAM_TYPE_AUDIO) {
+            if (snd_running && !step_one && fr.frame_size) {
+                void *item = nullptr;
+                if (xRingbufferSendAcquire(snd.ring, &item, fr.frame_size + 4, pdMS_TO_TICKS(200)) == pdTRUE) {
+                    const uint32_t gen = snd.gen;
+                    memcpy(item, &gen, 4);
+                    memcpy(static_cast<uint8_t *>(item) + 4, fr.frame_buffer, fr.frame_size);
+                    xRingbufferSendComplete(snd.ring, item);
+                }
+            }
+            esp_extractor_release_frame(ex, &fr);
+            continue;
+        }
+        if (fr.stream_type != ESP_EXTRACTOR_STREAM_TYPE_VIDEO || !fr.frame_size) {
+            const bool eos = EXTRACTOR_IS_EOS(fr.frame_flag);
+            esp_extractor_release_frame(ex, &fr);
+            if (eos) {
+                break;
+            }
+            continue;
+        }
+
+        /* a copy: AVCC lengths become start codes, SPS/PPS go in front after a start or a jump */
+        if (first_frame) {
+            annex_b = is_annex_b(fr.frame_buffer, fr.frame_size);
+            first_frame = false;
+        }
+        const size_t need = fr.frame_size + (need_head ? head_len : 0);
+        if (need > in_cap) {
+            heap_caps_free(in);
+            in_cap = need + 64 * 1024;
+            in = static_cast<uint8_t *>(heap_caps_malloc(in_cap, MALLOC_CAP_SPIRAM));
+            if (!in) {
+                in_cap = 0;
+                esp_extractor_release_frame(ex, &fr);
+                ok = false;
+                break;
+            }
+        }
+        size_t n = 0;
+        if (need_head) {
+            memcpy(in, head, head_len);
+            n = head_len;
+            need_head = false;
+        }
+        memcpy(in + n, fr.frame_buffer, fr.frame_size);
+        if (!annex_b) {
+            avcc_to_annex_b(in + n, fr.frame_size);
+        }
+        n += fr.frame_size;
+        const uint32_t pts = fr.pts;
+        esp_extractor_release_frame(ex, &fr);
+
+        /* decode every frame (the next ones refer to it), show it only when in time */
+        esp_h264_dec_in_frame_t din = {};
+        din.raw_data.buffer = in;
+        din.raw_data.len = n;
+        uint8_t *picture = nullptr;
+        uint32_t picture_size = 0;
+        const int64_t t0 = esp_timer_get_time();
+        while (din.raw_data.len) {
+            esp_h264_dec_out_frame_t dout = {};
+            if (esp_h264_dec_process(dec, &din, &dout) != ESP_H264_ERR_OK) {
+                break;
+            }
+            if (dout.out_size) {
+                picture = dout.outbuf;
+                picture_size = dout.out_size;
+            }
+            if (!din.consume) {
+                break;
+            }
+            din.raw_data.buffer += din.consume;
+            din.raw_data.len -= din.consume;
+        }
+        t_dec += esp_timer_get_time() - t0;
+        if (!picture) {
+            if (++bad_frames > MP4_BAD_FRAMES) {
+                ESP_LOGE(TAG, "frames cannot be decoded: not constrained baseline H.264?");
+                ok = false;
+                break;
+            }
+            continue;
+        }
+        bad_frames = 0;
+        pictures++;
+
+        if (!yuv) {
+            /* size of the decoded picture (rows padded to 16), the picture itself, the fit on the screen */
+            esp_h264_dec_param_sw_handle_t param = nullptr;
+            esp_h264_resolution_t res = {};
+            if (esp_h264_dec_sw_get_param_hd(dec, &param) == ESP_H264_ERR_OK &&
+                    esp_h264_dec_get_resolution(param, &res) == ESP_H264_ERR_OK && res.width && res.height) {
+                dec_w = res.width;
+                dec_h = res.height;
+            } else {
+                dec_w = vinfo.video_info.width;
+                dec_h = picture_size * 2 / 3 / dec_w;
+            }
+            pic_w = std::min<int>(vinfo.video_info.width ? vinfo.video_info.width : dec_w, dec_w) & ~1;
+            pic_h = std::min<int>(vinfo.video_info.height ? vinfo.video_info.height : dec_h, dec_h) & ~1;
+            yuv_size = align_up(static_cast<size_t>(pic_w) * pic_h * 3 / 2);
+            yuv = static_cast<uint8_t *>(heap_caps_aligned_calloc(ALIGN, 1, yuv_size, MALLOC_CAP_SPIRAM));
+            if (!yuv || static_cast<size_t>(dec_w) * dec_h * 3 / 2 > picture_size) {
+                ESP_LOGE(TAG, "picture %dx%d, %u bytes: no memory or wrong size", dec_w, dec_h, static_cast<unsigned>(picture_size));
+                ok = false;
+                break;
+            }
+            turned = pic_w > pic_h;
+            s_turned = turned ? 1 : 0;
+            const int rw = turned ? pic_h : pic_w;
+            const int rh = turned ? pic_w : pic_h;
+            steps = std::clamp(std::min(s_area_w * 16 / rw, s_area_h * 16 / rh), 1, 48);
+            out_w = rw * steps / 16;
+            out_h = rh * steps / 16;
+            ESP_LOGI(TAG, "picture %dx%d (decoded %dx%d), shown %dx%d", pic_w, pic_h, dec_w, dec_h, out_w, out_h);
+        }
+
+        const int64_t now = esp_timer_get_time();
+        if (resync) {
+            start_us = now - static_cast<int64_t>(pts) * 1000;
+            resync = false;
+        }
+        const int64_t due = start_us + static_cast<int64_t>(pts) * 1000;
+        s_frame = static_cast<uint32_t>(static_cast<uint64_t>(pts) * 1000 / upf);
+        if (now - due > 2 * static_cast<int64_t>(upf) && !step_one) {
+            dropped++;          /* late: decoded for the next frames, not shown */
+            continue;
+        }
+        i420_to_ppa(picture, dec_w, dec_h, pic_w, pic_h, yuv);
+        ppa_srm_oper_config_t op = {};
+        op.in.buffer = yuv;
+        op.in.pic_w = pic_w;
+        op.in.pic_h = pic_h;
+        op.in.block_w = pic_w;
+        op.in.block_h = pic_h;
+        op.in.srm_cm = PPA_SRM_COLOR_MODE_YUV420;
+        op.in.yuv_range = PPA_COLOR_RANGE_LIMIT;
+        op.in.yuv_std = PPA_COLOR_CONV_STD_RGB_YUV_BT601;
+        op.out.buffer = s_out[back];
+        op.out.buffer_size = s_out_size;
+        op.out.pic_w = out_w;
+        op.out.pic_h = out_h;
+        op.out.srm_cm = PPA_SRM_COLOR_MODE_RGB565;
+        op.rotation_angle = turned ? LANDSCAPE_ROTATION : PPA_SRM_ROTATION_ANGLE_0;
+        op.scale_x = steps / 16.0f;
+        op.scale_y = steps / 16.0f;
+        op.mode = PPA_TRANS_MODE_BLOCKING;
+        if (ppa_do_scale_rotate_mirror(ppa, &op) == ESP_OK) {
+            const int64_t wait = due - esp_timer_get_time();
+            if (wait > 1000 && !step_one) {
+                vTaskDelay(pdMS_TO_TICKS(wait / 1000));
+            }
+            if (bsp_display_lock(50)) {
+                if (s_img && !s_stop) {
+                    fill_dsc(s_dsc[back], s_out[back], out_w, out_h);
+                    lv_image_set_src(s_img, &s_dsc[back]);
+                    back ^= 1;
+                }
+                bsp_display_unlock();
+            }
+            step_one = false;
+        }
+    }
+    ESP_LOGI(TAG, "MP4 done: %u pictures, %u late, decode avg %.1f ms, stack left %u", static_cast<unsigned>(pictures),
+             static_cast<unsigned>(dropped), pictures ? t_dec / 1000.0 / pictures : 0.0,
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+
+done:
+    if (snd_running) {
+        snd.quit = true;
+        xSemaphoreTake(snd.done, portMAX_DELAY);
+    }
+    if (snd.spk) {
+        phone_audio_speaker_give();
+    }
+    if (snd.ring) {
+        vRingbufferDeleteWithCaps(snd.ring);
+    }
+    if (snd.done) {
+        vSemaphoreDelete(snd.done);
+    }
+    if (ppa) {
+        ppa_unregister_client(ppa);
+    }
+    if (dec) {
+        esp_h264_dec_close(dec);
+        esp_h264_dec_del(dec);
+    }
+    if (ex) {
+        esp_extractor_close(ex);
+    }
+    if (f) {
+        fclose(f);
+    }
+    heap_caps_free(in);
+    heap_caps_free(yuv);
+    s_state = ok ? ST_ENDED : ST_ERROR;
+    xSemaphoreGive(s_done);
+    vTaskDelete(nullptr);
+}
+
 /* Called with the LVGL lock held: the player never waits for that lock longer than 50 ms */
 void stop_player()
 {
@@ -624,7 +1199,11 @@ void open_video(int index)
     s_wait_layout = true;
     lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
     s_state = ST_IDLE;
-    if (xTaskCreate(player_task, "phone_video", 8192, nullptr, 4, &s_task) != pdPASS) {
+    const char *dot = strrchr(s_path.c_str(), '.');
+    const bool mp4 = dot && strcasecmp(dot, ".mp4") == 0;
+    /* MP4: the H.264 decoder takes most of core 1; LVGL runs on core 0 */
+    if ((mp4 ? xTaskCreatePinnedToCore(mp4_player_task, "phone_mp4", 8192, nullptr, 4, &s_task, 1)
+             : xTaskCreate(player_task, "phone_video", 8192, nullptr, 4, &s_task)) != pdPASS) {
         s_task = nullptr;
         s_state = ST_ERROR;
     }
@@ -737,8 +1316,8 @@ void on_timer(lv_timer_t *)
         s_shown_paused = paused;
         lv_label_set_text(s_play_label, state == ST_PLAYING && !paused ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
         if (state == ST_ERROR) {
-            lv_label_set_text(s_message, T("Không phát được video này.\nCần tệp .avi dạng MJPEG.",
-                                           "Cannot play this video.\nIt must be an MJPEG .avi file."));
+            lv_label_set_text(s_message, T("Không phát được video này.\nCần .avi MJPEG hoặc\n.mp4 H.264 baseline.",
+                                           "Cannot play this video.\nIt must be an MJPEG .avi or a\nbaseline H.264 .mp4 file."));
             show_overlay();
         } else if (state == ST_ENDED) {
             close_player();
@@ -785,7 +1364,7 @@ void add_dir(const std::string &dir, int depth)
             if (depth > 0) {
                 subdirs.push_back(path);
             }
-        } else if (dot && strcasecmp(dot, ".avi") == 0) {
+        } else if (dot && (strcasecmp(dot, ".avi") == 0 || strcasecmp(dot, ".mp4") == 0)) {
             s_files.push_back(path);
         }
     }
