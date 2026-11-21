@@ -28,15 +28,20 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
 - **Camera app**: live preview of the CSI sensor (cropped, scaled and rotated by the PPA) and photos saved as JPEG (hardware encoder) in `/sdcard/DCIM`. The sensor is powered down when the app is in the background.
 - **Gallery app**: the photos of `/sdcard/DCIM` as a grid of thumbnails, newest first, with a viewer (previous / next by buttons or swipe) and delete. Photos are decoded by the hardware JPEG decoder and scaled by the PPA.
 - **Weather app**: current conditions and a 7-day forecast from [open-meteo.com](https://open-meteo.com) (HTTPS, no key) for a city picked from a list. Needs Wi-Fi with Internet access.
-- **Music app**: plays the MP3, WAV, FLAC, AAC, M4A and OGG files of the card (up to three folder levels deep) on the speaker (mono), with play / pause, previous, next, repeat (off, list, one track) and auto-advance. MP3 files show the title, artist and duration of their ID3 tag, read in the background, and the JPEG cover of the tag (baseline JPEG only; a colored placeholder otherwise). It keeps playing in the background and with the screen off, and follows the phone volume. The newest player gets the speaker: Music and Radio stop for each other, and Video or the AI Assistant stop them (`phone_audio_speaker_take_yielding()`; the holder gives the speaker back at once).
+- **Music app**: plays the MP3, WAV, FLAC, AAC, M4A and OGG files of the card (up to three folder levels deep) on the speaker (mono), with play / pause, previous, next, repeat (off, list, one track), shuffle and auto-advance. Drag the progress bar to seek (MP3, AAC, WAV and FLAC). A star on every row marks favorites, kept in `/sdcard/Music/favorites.txt`, and a filter shows all tracks or the favorites only. A tap on the artwork switches it to a rainbow spectrum (remembered); a crossed speaker badge breathes over it while the phone is muted. MP3 files show the title, artist and duration of their ID3 tag, read in the background, and the JPEG cover of the tag (baseline JPEG only; a colored placeholder otherwise). It keeps playing in the background and with the screen off, and follows the phone volume. The newest player gets the speaker: Music and Radio stop for each other, and Video or the AI Assistant stop them (`phone_audio_speaker_take_yielding()`; the holder gives the speaker back at once).
 - **Radio app**: internet radio through the GMF simple player, as in MetalioClaw4: HLS (`.m3u8`; AAC, MP3 or MPEG-TS segments) and direct Icecast / Shoutcast streams (MP3, AAC, OGG, FLAC; the type is found in the data, so URLs without an extension work). For direct streams the song title of the ICY metadata replaces "Playing" (the metadata blocks are taken out of the sound in the HTTP read hook; `patches/gmf_io-http-on-header.patch` passes the response headers, `icy-metaint` and `Content-Type`, to that hook). The app shows station name, status, stream format, a 12-band spectrum (`gmf_fft`), previous / play-stop / next, volume, and the station list. The stations are **only** in `/sdcard/radio/stations.json` on the card, there is no list in the firmware: `{"stations": [{"name": "VOV1", "url": "https://.../playlist.m3u8"}, ...]}` (or a bare array), up to 100 stations and 64 KB; entries without a name or an http(s) URL are skipped. A sample with 13 Vietnamese stations and 5 English ones (music, news) is in `sdcard/radio/stations.json`: copy it to the card (USB drive of the Files app). Without the file the app says why and offers Retry; it never writes to the card. The last station is remembered and plays when the app opens. It keeps playing in the background and with the screen off; closing the app stops it. Played at the rate of the stream, mixed to mono. The HLS `.aac` segments start with an ID3 tag that the GMF decoder takes for MP3: `patches/gmf_audio-hls-aac.patch` (from MetalioClaw4) is applied to `managed_components/espressif__gmf_audio` by `CMakeLists.txt` at every configure.
-- **Video app**: plays Motion JPEG `.avi` files with 16-bit PCM sound from the card (hardware JPEG decoder, PPA scaling). Landscape videos are turned to fill the portrait screen. The ESP32-P4 has no H.264 decoder, so other videos must be converted first:
+- **Video app**: plays videos of the card in full screen (the status bar hides), with play / pause, previous / next and a progress bar to seek. Landscape videos are turned to fill the portrait screen and the controls turn with them.
+  - `.avi` with Motion JPEG and 16-bit PCM sound: hardware JPEG decoder, PPA scaling.
+  - `.mp4` with H.264 **constrained baseline** and AAC sound: the ESP32-P4 has no H.264 decoder, so the software decoder of `espressif/esp_h264` runs on core 1 (`espressif/esp_extractor` reads the file). 640 x 360 plays smoothly at 24 fps (about 22 ms a frame); 640 x 480 drops some frames, 800 x 480 about half. Main and High profile files (most YouTube downloads) do not play.
+
+  Convert other videos first:
 
   ```
-  ffmpeg -i in.mp4 -vf scale=800:480 -r 20 -c:v mjpeg -q:v 5 -pix_fmt yuvj420p -c:a pcm_s16le -ar 22050 -ac 1 out.avi
+  ffmpeg -i in.mp4 -vf "scale=640:360:force_original_aspect_ratio=decrease:force_divisible_by=2" -c:v libx264 -profile:v baseline -level 3.1 -bf 0 -g 48 -crf 23 -pix_fmt yuv420p -c:a aac -b:a 64k -ar 22050 -ac 1 -movflags +faststart out.mp4
+  ffmpeg -i in.mp4 -vf "scale=800:480:force_original_aspect_ratio=decrease:force_divisible_by=2" -r 20 -c:v mjpeg -q:v 5 -pix_fmt yuvj420p -c:a pcm_s16le -ar 22050 -ac 1 out.avi
   ```
 - **Second screen app**: the board as a USB display with touch for a PC, 480 x 800 portrait or 800 x 480 landscape (turned by the PPA), on the USB HS Type-C socket (high-speed device 303A:2986, "udisp" protocol of the [xfz1986 USB graphic driver](https://github.com/chuanjinpang/win10_idd_xfz1986_usb_graphic_driver_display), for Windows and Linux). The PC sends JPEG pictures, decoded by the hardware decoder; touches go back as a HID touch screen. Measured: about 8.6 MB/s from the PC, 30 to 58 pictures per second shown.
-- **USB camera app**: live picture of a UVC webcam on the Type-A host socket (MJPEG, up to 1280 x 720, hardware JPEG decoder) and photos saved in `/sdcard/DCIM`. The app turns the 5 V boost on for the socket and releases the USB port in the background. Leave the USB HS Type-C socket unplugged while a webcam is in use: both sockets share one port.
+- **USB camera app**: live picture of a UVC webcam on the Type-A host socket (MJPEG at 640 x 480, hardware JPEG decoder; the USB host of the ESP32-P4 only takes isochronous endpoints of one transaction per microframe, see `patches/usb_host_uvc-single-transaction-isoc.patch`) and photos saved in `/sdcard/DCIM`. The app turns the 5 V boost on for the socket and releases the USB port in the background. Leave the USB HS Type-C socket unplugged while a webcam is in use: both sockets share one port.
 - **AI Assistant app**: voice assistant on the [xiaozhi.me](https://xiaozhi.me) service through the `esp_xiaozhi` component. The first run shows the activation code to enter on the site. Then one button starts a conversation: the microphone is sent as Opus over WebSocket, the answer is played on the speaker and shown as chat bubbles under an animated face, and the assistant listens again after each answer until the button or the server ends the conversation. Half duplex, no wake word yet.
 - **Files app**: browse the microSD card, read text files (`.txt`, `.json`, `.md`, `.log`, `.csv`, `.m3u8`, `.srt`, ..., first 32 KB), see the details of a file, delete files and empty folders. The USB button lends the card to a PC as a USB drive (mass storage, high speed, on the USB HS Type-C socket) until it is turned off or the app is left; the card is never formatted. Measured with GNOME Disks on a 32 GB card: 7.2 MB/s read, 4.8 MB/s write. The automatic stop command (CMD12) of a multiple block write breaks during long bursts on this board (the SDMMC host is shared with the SDIO link of the ESP32-C5), so writes use SET_BLOCK_COUNT (CMD23) instead, through a local copy of `esp_driver_sdmmc` (see `components/esp_driver_sdmmc/README_LOCAL.md`); a card without CMD23 is written one sector at a time (about 450 KB/s). The Music, Video and Gallery apps keep files of the card open while they run, so close them first.
 - **Quick settings**: pull down from the top edge (the panel follows the finger): time, date, battery, a button to Settings, Wi-Fi and Silent tiles (a long press on Wi-Fi opens its Settings page) and brightness and volume sliders, shared with Settings and the volume keys. A swipe up from its handle or a tap below closes it; gestures made on it do not reach the launcher or the apps. Not on the lock screen.
@@ -84,10 +89,10 @@ Settings are stored in NVS (namespace `phone`).
   - `phone_power.cpp`: battery polling, power key, power menu (AXP2101 through the BSP).
   - `phone_lock.cpp`: lock screen and screen power policy.
   - `phone_volume.cpp`: volume keys and volume panel.
-  - `phone_audio.cpp`: speaker volume, the confirmation beep, and lending the speaker to the Music app.
+  - `phone_audio.cpp`: speaker volume, the confirmation beep, and lending the speaker to the Music, Radio and Video apps and the AI Assistant.
   - `phone_storage.cpp`: microSD mount.
   - `phone_locale.cpp`: language, time zone and small NVS preferences.
-  - `fonts/`: UI fonts with Vietnamese glyphs (Be Vietnam Pro, 12 to 28 px, SIL Open Font License, see `fonts/OFL.txt`) and the 120 px clock digits.
+  - `fonts/`: UI fonts with Vietnamese glyphs (Be Vietnam Pro, 12 to 28 px, SIL Open Font License, see `fonts/OFL.txt`) and the 120 px digits of the lock screen clock (Be Vietnam Pro Medium).
   - `tools/gen_lv_font.py`: script that generated the UI fonts from the TTF (Python with Pillow).
 - `components/phone_app_level/`: the Level app.
 - `components/phone_app_camera/`: the Camera app.
@@ -96,6 +101,8 @@ Settings are stored in NVS (namespace `phone`).
 - `components/phone_app_music/`: the Music app (decoders from `espressif/esp_audio_codec`, fetched by the component manager). `music/` holds the ID3 parser, track library and background metadata service, adapted from the author's esp_chatbot_v1 project.
 - `components/phone_app_radio/`: the Radio app. `radio_player.cpp` (GMF simple player, HLS reader, HTTPS with the certificate bundle, spectrum) is ported from MetalioClaw4; `radio_stations.cpp` reads the JSON list. Versions pinned in its `idf_component.yml` keep `esp_audio_codec` 2.6 and `esp_codec_dev` 1.5 of the other apps (`gmf_io` 1.0.1 and later want `esp_codec_dev` 2.0 beta).
 - `components/phone_app_video/`: the Video app.
+- `components/phone_spectrum/`: the spectrum of the Music and Radio apps (`espressif/gmf_fft`).
+- `components/esp_driver_sdmmc/`: a local copy of the ESP-IDF v6.1 SDMMC driver that writes with SET_BLOCK_COUNT (CMD23) instead of the automatic stop command (see its `README_LOCAL.md`).
 - `components/phone_app_files/`: the Files app.
 - `components/phone_app_assistant/`: the AI Assistant app. `assistant_chat.cpp` is the voice session (Opus from `espressif/esp_audio_codec`), `assistant_emote.cpp` the animated face; `eaf/` holds the EAF animation decoder of `espressif2022/esp_emote_gfx` (Apache-2.0) and `emote/` the eye animations (Espressif Emote Pack, license not confirmed, see the README there).
 - `components/esp_xiaozhi/`: Xiaozhi protocol component of esp-iot-solution (Apache-2.0), copied from the author's esp_chatbot_v1 project; the language reported to the server is a Kconfig option here.
@@ -125,6 +132,16 @@ idf.py -p {port} flash monitor
 ```
 
 To exit the serial monitor, type `Ctrl-]`.
+
+## Third-party assets
+
+- Fonts: Be Vietnam Pro (UI and clock) and Noto Sans CJK (Chinese text of the AI Assistant), SIL Open Font License 1.1, see `components/phone_app_settings/fonts/OFL.txt` and `OFL-NotoSansCJK.txt`.
+- ESP-Brookesia (`components/brookesia_core`, Calculator, 2048, Squareline demo), `esp_xiaozhi`, the EAF decoder and the local `esp_driver_sdmmc`: Apache-2.0, from Espressif.
+- The eye animations of the AI Assistant (`components/phone_app_assistant/emote/`) come from Espressif's Emote Pack, published without a license file: their license is not confirmed (see the README there).
+
+## Version
+
+The About page shows the version from `git describe` (for example `v0.1.0`, or `v0.1.0-3-gabcdef0-dirty` for a later build).
 
 ## Notes
 

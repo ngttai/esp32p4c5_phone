@@ -20,7 +20,7 @@
 
 #define TAG "LOCK"
 
-LV_FONT_DECLARE(font_puhui_number_120_4);
+LV_FONT_DECLARE(phone_font_clock_120);
 /* Launcher wallpaper of the 480x800 dark stylesheet (shown centered on 0x1A1A1A, as on the launcher) */
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_wallpaper_dark_480_480);
 /* Status bar icons of the same stylesheet, so the lock screen matches the status bar */
@@ -351,7 +351,7 @@ lv_obj_t *digit_label(lv_obj_t *parent, int32_t y)
 {
     lv_obj_t *l = lv_label_create(parent);
     lv_label_set_text(l, "0");
-    lv_obj_set_style_text_font(l, &font_puhui_number_120_4, 0);
+    lv_obj_set_style_text_font(l, &phone_font_clock_120, 0);
     lv_obj_set_style_text_color(l, lv_color_hex(DIGIT_COLOR), 0);
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_width(l, DIGIT_W);
@@ -362,7 +362,7 @@ lv_obj_t *digit_label(lv_obj_t *parent, int32_t y)
 void make_digit(lv_obj_t *parent, FlipDigit *d)
 {
     *d = {};
-    d->label_ofs_y = (DIGIT_H - font_puhui_number_120_4.line_height) / 2;
+    d->label_ofs_y = (DIGIT_H - phone_font_clock_120.line_height) / 2;
     d->card = lv_obj_create(parent);
     lv_obj_remove_style_all(d->card);
     lv_obj_set_size(d->card, DIGIT_W, DIGIT_H);
