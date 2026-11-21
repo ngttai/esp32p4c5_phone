@@ -554,6 +554,12 @@ bool PhoneRadio::close()
 
 /* Home: the radio keeps playing in the background (and with the screen off); closing the app stops
  * it, and so does another player taking the speaker */
+bool PhoneRadio::keepRunning() const
+{
+    const radio::Status st = radio::status();
+    return st == radio::Status::PLAYING || st == radio::Status::CONNECTING || st == radio::Status::RETRYING;
+}
+
 bool PhoneRadio::pause()
 {
     return true;

@@ -15,7 +15,7 @@
  * Convert a video with ffmpeg:
  *   ffmpeg -i in.mp4 -vf "scale=800:480:force_original_aspect_ratio=decrease:force_divisible_by=2" -r 20
  *          -c:v mjpeg -q:v 5 -c:a pcm_s16le -ar 22050 -ac 1 out.avi
- *   ffmpeg -i in.mp4 -vf "scale=640:480:force_original_aspect_ratio=decrease:force_divisible_by=2"
+ *   ffmpeg -i in.mp4 -vf "scale=640:360:force_original_aspect_ratio=decrease:force_divisible_by=2" -r 20
  *          -c:v libx264 -profile:v baseline -level 3.1 -bf 0 -g 48 -crf 23 -pix_fmt yuv420p
  *          -c:a aac -b:a 64k -ar 22050 -ac 1 -movflags +faststart out.mp4
  */
@@ -57,6 +57,7 @@
 #include "phone_fonts.h"
 #include "phone_locale.h"
 #include "phone_lock.h"
+#include "phone_quick.h"
 #include "phone_storage.h"
 #include "phone_app_video.hpp"
 
@@ -380,8 +381,9 @@ void player_task(void *)
             const int64_t now = esp_timer_get_time();
             frame++;
             s_frame = frame;
-            /* more than two frames late: drop this one */
-            const bool drop = now - due > 2 * static_cast<int64_t>(avi.usec_per_frame);
+            /* more than two frames late, or under the quick settings panel (a new picture would redraw the
+             * whole panel): drop this one */
+            const bool drop = now - due > 2 * static_cast<int64_t>(avi.usec_per_frame) || phone_quick_visible();
             if (size > 0 && size <= FRAME_MAX && !drop) {
                 if (size > in_size) {
                     free(in);
@@ -983,6 +985,9 @@ void mp4_player_task(void *)
         }
         const int64_t due = start_us + static_cast<int64_t>(pts) * 1000;
         s_frame = static_cast<uint32_t>(static_cast<uint64_t>(pts) * 1000 / upf);
+        if (phone_quick_visible() && !step_one) {
+            continue;           /* under the quick settings panel: decoded for the next frames, not shown */
+        }
         if (now - due > 2 * static_cast<int64_t>(upf) && !step_one) {
             dropped++;          /* late: decoded for the next frames, not shown */
             continue;
@@ -1320,7 +1325,13 @@ void on_timer(lv_timer_t *)
                                            "Cannot play this video.\nIt must be an MJPEG .avi or a\nbaseline H.264 .mp4 file."));
             show_overlay();
         } else if (state == ST_ENDED) {
-            close_player();
+            /* the next video of the list plays on; after the last one the list comes back */
+            if (s_index + 1 < static_cast<int>(s_files.size())) {
+                stop_player();
+                open_video(s_index + 1);
+            } else {
+                close_player();
+            }
             return;
         }
     }

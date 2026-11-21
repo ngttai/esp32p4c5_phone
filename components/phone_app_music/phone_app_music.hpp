@@ -14,6 +14,7 @@ protected:
     bool run() override;
     bool back() override;
     bool close() override;
+    bool keepRunning() const override;     // playing: not closed at the running app limit
 
 private:
     PhoneMusic();

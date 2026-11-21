@@ -231,8 +231,20 @@ bool Manager::startApp(int id)
 
     // Check if the running app num is at the limit
     if ((_core_data.app.max_running_num != 0) && (int)_id_running_app_map.size() >= _core_data.app.max_running_num) {
+        /* the least recently shown app that does not ask to keep running (music playing in the background);
+         * the map is unordered, its last entry was an arbitrary app */
+        App *any_old = nullptr;
         for (auto it = _id_running_app_map.begin(); it != _id_running_app_map.end(); it++) {
-            app_old = it->second;
+            App *candidate = it->second;
+            if ((any_old == nullptr) || (candidate->_active_stamp < any_old->_active_stamp)) {
+                any_old = candidate;
+            }
+            if (!candidate->keepRunning() && ((app_old == nullptr) || (candidate->_active_stamp < app_old->_active_stamp))) {
+                app_old = candidate;
+            }
+        }
+        if (app_old == nullptr) {
+            app_old = any_old;
         }
         ESP_UTILS_CHECK_NULL_RETURN(app_old, false, "Get old app failed");
 
@@ -277,6 +289,7 @@ bool Manager::processAppRun(App *app)
 
     // Update active app
     _active_app = app;
+    app->_active_stamp = ++_active_stamp_counter;
 
     return true;
 
@@ -316,6 +329,7 @@ bool Manager::processAppResume(App *app)
 
     // Update active app
     _active_app = app;
+    app->_active_stamp = ++_active_stamp_counter;
 
     return true;
 }

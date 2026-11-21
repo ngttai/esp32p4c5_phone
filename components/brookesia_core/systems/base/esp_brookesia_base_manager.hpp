@@ -118,6 +118,7 @@ private:
     App *_active_app{nullptr};
     std::unordered_map <int, App *> _id_installed_app_map;
     std::unordered_map <int, App *> _id_running_app_map;
+    uint32_t _active_stamp_counter = 0;
     std::unordered_map <int, lv_draw_buf_t *> _id_app_snapshot_map;
     // Navigation
     NavigateType _navigate_type{NavigateType::MAX};

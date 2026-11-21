@@ -1678,6 +1678,11 @@ bool PhoneMusic::back()
 }
 
 /* Leaving to the home screen keeps the music playing; closing the app stops it */
+bool PhoneMusic::keepRunning() const
+{
+    return s_playing;
+}
+
 bool PhoneMusic::close()
 {
     s_viz_feed = false;

@@ -317,6 +317,17 @@ protected:
     }
 
     /**
+     * @brief True while the app does something in the background that closing it would stop (for example
+     *        playing sound). At the limit of running apps the core closes the least recently used app that
+     *        returns false here (local change of the phone repository).
+     *
+     */
+    virtual bool keepRunning(void) const
+    {
+        return false;
+    }
+
+    /**
      * @brief Called when the app starts to close. The app can perform extra resource cleanup here.
      *
      * @note If there are resources that not recorded by the core (not created in the `run()` and `pause()` functions,
@@ -397,6 +408,8 @@ protected:
     Context *_system_context = nullptr;
 
 private:
+    uint32_t _active_stamp = 0;     /* when the app was last shown, to close the least recently used one */
+
     virtual bool beginExtra(void)
     {
         return true;

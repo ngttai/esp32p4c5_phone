@@ -19,6 +19,7 @@ protected:
     bool back() override;
     bool close() override;
     bool pause() override;
+    bool keepRunning() const override;     // playing: not closed at the running app limit
 
 private:
     PhoneRadio();
