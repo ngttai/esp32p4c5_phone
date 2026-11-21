@@ -256,7 +256,15 @@ void update_bars()
 {
     /* not under the quick settings panel: it covers the bars, and each change would redraw it */
     if (!phone_quick_visible()) {
-        spectrum::view_update(s_view);
+        /* the levels are shared: another player (music in the background) feeds them too */
+        static bool cleared;
+        if (radio::status() == radio::Status::PLAYING) {
+            spectrum::view_update(s_view);
+            cleared = false;
+        } else if (!cleared) {
+            spectrum::view_clear(s_view);           /* once: it restyles every bar */
+            cleared = true;
+        }
     }
 }
 

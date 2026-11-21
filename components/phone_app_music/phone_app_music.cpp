@@ -1343,7 +1343,15 @@ void on_viz_timer(lv_timer_t *)
     const bool muted = phone_audio_get_volume() == 0;
     s_viz_feed = s_show_viz && on_screen && s_playing && !s_paused && !muted;
     if (s_show_viz && on_screen) {
-        spectrum::view_update(s_viz_view);
+        /* the levels are shared: another player (the radio in the background) feeds them too */
+        static bool cleared;
+        if (s_playing && !s_paused) {
+            spectrum::view_update(s_viz_view);
+            cleared = false;
+        } else if (!cleared) {
+            spectrum::view_clear(s_viz_view);       /* once: it restyles every bar */
+            cleared = true;
+        }
     }
     /* muted: a dark disc with a crossed speaker, breathing (2.4 s, from full to 15 %), over the cover
      * or the bars */
