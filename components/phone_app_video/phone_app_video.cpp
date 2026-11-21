@@ -65,8 +65,11 @@ constexpr size_t FRAME_MAX = 2 * 1024 * 1024;
 constexpr size_t AUDIO_MAX = 256 * 1024;
 constexpr int HEADER_H = 60;
 constexpr uint32_t OVERLAY_MS = 3000;       // the controls hide after this long
+constexpr int STEP_GAP = 120;               // from the play button to the previous / next buttons
+constexpr uint32_t RESTART_US = 3000000;    // previous after this much of a video: back to its start
 /* Landscape videos are turned to fill the portrait screen (counter-clockwise) */
 constexpr ppa_srm_rotation_angle_t LANDSCAPE_ROTATION = PPA_SRM_ROTATION_ANGLE_90;
+constexpr int LANDSCAPE_TURN = 2700;        // the same turn for the labels (LVGL: 0.1 degree, clockwise)
 
 constexpr uint32_t COLOR_BG = 0x101418;
 constexpr uint32_t COLOR_ROW = 0x1E252C;
@@ -177,6 +180,9 @@ lv_obj_t *s_title;
 lv_obj_t *s_time;
 lv_obj_t *s_bar;
 lv_obj_t *s_play_label;
+lv_obj_t *s_prev_btn, *s_next_btn;     // the videos before and after it in the list
+lv_obj_t *s_prev_label, *s_next_label;
+int s_index = -1;           // of the open video in s_files
 lv_obj_t *s_message;
 int s_area_w, s_area_h;     // room for the picture
 uint8_t *s_out[2];
@@ -198,6 +204,15 @@ std::atomic<uint32_t> s_total;
 std::atomic<uint32_t> s_usec_per_frame{50000};
 std::atomic<int> s_seek{-1};            // position asked by the progress slider, 0..1000
 bool s_dragging;                        // the progress slider is held (LVGL task)
+std::atomic<int> s_turned{-1};          // the picture is turned (landscape video); -1 until the first frame
+bool s_wait_layout;                     // the controls stay hidden until the way of the picture is known
+bool s_shown_turned;                    // the controls are laid out for a turned picture
+/* Full screen while a video is open: the status bar hides and the app screen covers the whole display */
+phone::StatusBar *s_status_bar;
+lv_obj_t *s_screen;
+int s_home_x, s_home_y;     // place of the app screen below the status bar
+int s_home_w, s_home_h;
+bool s_full;
 
 /* Find the first video chunk at or after the current position of the file (a jump lands anywhere in
  * the "movi" list): its header "NNdc"/"NNdb" with a size that fits and JPEG data after it. Leaves
@@ -371,6 +386,7 @@ void player_task(void *)
                                                          &out_cfg, &rgb_size));
                             /* fit the screen in 1/16 steps; landscape is turned */
                             turned = avi.width > avi.height;
+                            s_turned = turned ? 1 : 0;
                             const int rw = turned ? avi.height : avi.width;
                             const int rh = turned ? avi.width : avi.height;
                             steps = std::clamp(std::min(s_area_w * 16 / rw, s_area_h * 16 / rh), 1, 48);
@@ -491,6 +507,82 @@ std::string name_of(const std::string &path)
     return slash == std::string::npos ? path : path.substr(slash + 1);
 }
 
+/* Turn a label with the picture, about its own center */
+void turn_label(lv_obj_t *label, bool turned)
+{
+    lv_obj_set_style_transform_pivot_x(label, LV_PCT(50), 0);
+    lv_obj_set_style_transform_pivot_y(label, LV_PCT(50), 0);
+    lv_obj_set_style_transform_rotation(label, turned ? LANDSCAPE_TURN : 0, 0);
+}
+
+/* Lays the controls out for the way the picture is seen. A turned picture is watched with the phone
+ * turned clockwise: the top of the video is the left edge of the screen and its bottom the right edge,
+ * so the progress slider stands along the right edge and runs upwards (as an LVGL vertical slider does).
+ * Only the labels are turned; the play button is round and the slider vertical, so touches need no
+ * transform. */
+void layout_controls(bool turned)
+{
+    s_shown_turned = turned;
+    const int half_w = s_area_w / 2;
+    const int title_h = lv_font_get_line_height(phone_font_by_size(18)) + 8;
+    const int time_h = lv_font_get_line_height(phone_font_by_size(16)) + 6;
+    turn_label(s_title, turned);
+    turn_label(s_time, turned);
+    turn_label(s_message, turned);
+    turn_label(s_play_label, turned);
+    turn_label(s_prev_label, turned);
+    turn_label(s_next_label, turned);
+    /* the right of a turned picture is the top of the screen */
+    lv_obj_align(s_prev_btn, LV_ALIGN_CENTER, turned ? 0 : -STEP_GAP, turned ? STEP_GAP : 0);
+    lv_obj_align(s_next_btn, LV_ALIGN_CENTER, turned ? 0 : STEP_GAP, turned ? -STEP_GAP : 0);
+    if (turned) {
+        lv_obj_set_style_max_width(s_title, s_area_h - 32, 0);
+        lv_obj_align(s_title, LV_ALIGN_CENTER, -half_w + 12 + title_h / 2, 0);
+        lv_obj_align(s_message, LV_ALIGN_CENTER, -90, 0);
+        lv_obj_align(s_time, LV_ALIGN_CENTER, half_w - 64 - time_h / 2, 0);
+        lv_obj_set_size(s_bar, 6, s_area_h - 48);
+        lv_obj_align(s_bar, LV_ALIGN_RIGHT_MID, -48, 0);
+    } else {
+        lv_obj_set_style_max_width(s_title, s_area_w - 32, 0);
+        lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, 12);
+        lv_obj_align(s_message, LV_ALIGN_CENTER, 0, -90);
+        lv_obj_align(s_time, LV_ALIGN_BOTTOM_MID, 0, -64);
+        lv_obj_set_size(s_bar, s_area_w - 48, 6);
+        lv_obj_align(s_bar, LV_ALIGN_BOTTOM_MID, 0, -48);
+    }
+}
+
+void set_full(bool on)
+{
+    if (!s_screen || on == s_full) {
+        return;
+    }
+    s_full = on;
+    if (s_status_bar) {
+        s_status_bar->setVisualMode(on ? phone::StatusBar::VisualMode::HIDE : phone::StatusBar::VisualMode::SHOW_FIXED);
+    }
+    /* LVGL never resizes a screen (lv_obj_refr_size() skips objects without a parent) and draws nothing
+     * of it outside its area, so the area of the screen is set here. The core created it with the size
+     * of the visual area below the status bar. */
+    if (on) {
+        s_home_x = lv_obj_get_x(s_screen);
+        s_home_y = lv_obj_get_y(s_screen);
+        lv_obj_set_pos(s_screen, 0, 0);
+        s_area_w = BSP_LCD_H_RES;
+        s_area_h = BSP_LCD_V_RES;
+    } else {
+        lv_obj_set_pos(s_screen, s_home_x, s_home_y);
+        s_area_w = s_home_w;
+        s_area_h = s_home_h;
+    }
+    s_screen->coords.x2 = s_screen->coords.x1 + s_area_w - 1;
+    s_screen->coords.y2 = s_screen->coords.y1 + s_area_h - 1;
+    lv_obj_mark_layout_as_dirty(s_root);         // its size is 100 % of the screen
+    lv_obj_invalidate(s_screen);
+    lv_obj_update_layout(s_screen);
+    layout_controls(s_shown_turned);
+}
+
 void show_overlay()
 {
     s_overlay_until = lv_tick_get() + OVERLAY_MS;
@@ -502,6 +594,7 @@ void close_player()
     stop_player();
     lv_image_set_src(s_img, nullptr);
     lv_obj_add_flag(s_player, LV_OBJ_FLAG_HIDDEN);
+    set_full(false);
 }
 
 void open_video(int index)
@@ -510,6 +603,9 @@ void open_video(int index)
         return;
     }
     s_path = s_files[index];
+    s_index = index;
+    lv_obj_set_state(s_prev_btn, LV_STATE_DISABLED, false);      // previous also goes back to the start
+    lv_obj_set_state(s_next_btn, LV_STATE_DISABLED, index + 1 >= static_cast<int>(s_files.size()));
     s_stop = false;
     s_paused = false;
     s_frame = 0;
@@ -520,9 +616,13 @@ void open_video(int index)
     lv_slider_set_value(s_bar, 0, LV_ANIM_OFF);
     s_seek = -1;
     s_dragging = false;
+    s_turned = -1;
     lv_image_set_src(s_img, nullptr);
     lv_obj_remove_flag(s_player, LV_OBJ_FLAG_HIDDEN);
-    show_overlay();
+    set_full(true);             // before the player task reads the size of the picture area
+    /* the controls show once the first frame tells which way they go (on_timer) */
+    s_wait_layout = true;
+    lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
     s_state = ST_IDLE;
     if (xTaskCreate(player_task, "phone_video", 8192, nullptr, 4, &s_task) != pdPASS) {
         s_task = nullptr;
@@ -541,6 +641,27 @@ void on_play(lv_event_t *)
         s_paused = !s_paused;
     }
     show_overlay();
+}
+
+/* Previous / next video in the list. Previous goes back to the start of the video first once it has
+ * played a while, as phones do. */
+void on_step(lv_event_t *e)
+{
+    const int step = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    if (step < 0 && s_state == ST_PLAYING &&
+            static_cast<uint64_t>(s_frame) * s_usec_per_frame >= RESTART_US) {
+        s_seek = 0;
+        show_overlay();
+        return;
+    }
+    const int index = s_index + step;
+    if (index < 0 || index >= static_cast<int>(s_files.size())) {
+        show_overlay();
+        return;
+    }
+    stop_player();
+    lv_image_set_src(s_img, nullptr);
+    open_video(index);
 }
 
 /* Progress slider: jumps when it is let go */
@@ -562,6 +683,9 @@ void on_seek(lv_event_t *e)
 /* A tap on the picture shows or hides the controls */
 void on_tap(lv_event_t *)
 {
+    if (s_wait_layout) {
+        return;
+    }
     if (lv_obj_has_flag(s_overlay, LV_OBJ_FLAG_HIDDEN)) {
         show_overlay();
     } else {
@@ -595,6 +719,19 @@ void on_timer(lv_timer_t *)
     }
     const int state = s_state;
     const bool paused = s_paused;
+    if (!s_full && lv_obj_get_screen(s_root) == lv_screen_active()) {
+        set_full(true);         // back from the background (the core showed the status bar again)
+    }
+    const int turned = s_turned;
+    if (s_wait_layout) {
+        if (turned >= 0 || state == ST_ERROR) {
+            s_wait_layout = false;
+            layout_controls(turned > 0);
+            show_overlay();
+        }
+    } else if (turned >= 0 && (turned > 0) != s_shown_turned) {
+        layout_controls(turned > 0);
+    }
     if (state != s_shown_state || paused != s_shown_paused) {
         s_shown_state = state;
         s_shown_paused = paused;
@@ -715,12 +852,16 @@ void build_ui()
     lv_obj_add_event_cb(root, [](lv_event_t *) {
         s_root = nullptr;
         s_img = nullptr;
+        s_screen = nullptr;
+        s_full = false;
     }, LV_EVENT_DELETE, nullptr);
     lv_obj_update_layout(root);
     const int root_w = lv_obj_get_width(root);
     const int root_h = lv_obj_get_height(root);
-    s_area_w = root_w;
-    s_area_h = root_h;
+    s_area_w = s_home_w = root_w;
+    s_area_h = s_home_h = root_h;
+    s_screen = lv_obj_get_screen(root);
+    s_full = false;
 
     lv_obj_t *title = lv_label_create(root);
     lv_obj_set_style_text_font(title, phone_font_by_size(24), 0);
@@ -743,7 +884,7 @@ void build_ui()
     /* player: black page with the picture, and controls that hide while playing */
     s_player = lv_obj_create(root);
     lv_obj_remove_style_all(s_player);
-    lv_obj_set_size(s_player, root_w, root_h);
+    lv_obj_set_size(s_player, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_opa(s_player, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(s_player, lv_color_black(), 0);
     lv_obj_remove_flag(s_player, LV_OBJ_FLAG_SCROLLABLE);
@@ -756,7 +897,7 @@ void build_ui()
 
     s_overlay = lv_obj_create(s_player);
     lv_obj_remove_style_all(s_overlay);
-    lv_obj_set_size(s_overlay, root_w, root_h);
+    lv_obj_set_size(s_overlay, LV_PCT(100), LV_PCT(100));
     lv_obj_remove_flag(s_overlay, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
 
     s_title = lv_label_create(s_overlay);
@@ -767,14 +908,11 @@ void build_ui()
     lv_obj_set_style_pad_hor(s_title, 12, 0);
     lv_obj_set_style_pad_ver(s_title, 4, 0);
     lv_label_set_long_mode(s_title, LV_LABEL_LONG_MODE_DOTS);
-    lv_obj_set_style_max_width(s_title, root_w - 32, 0);
-    lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, 12);
     lv_label_set_text(s_title, "");
 
     s_message = lv_label_create(s_overlay);
     lv_obj_set_style_text_align(s_message, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(s_message, lv_color_hex(0xF87171), 0);
-    lv_obj_align(s_message, LV_ALIGN_CENTER, 0, -90);
     lv_label_set_text(s_message, "");
 
     lv_obj_t *play = lv_button_create(s_overlay);
@@ -791,6 +929,26 @@ void build_ui()
     lv_label_set_text(s_play_label, LV_SYMBOL_PAUSE);
     lv_obj_center(s_play_label);
 
+    auto step_button = [](lv_obj_t *parent, const char *symbol, int step, lv_obj_t **label) {
+        lv_obj_t *btn = lv_button_create(parent);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_size(btn, 60, 60);
+        lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_60, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_80, LV_STATE_PRESSED);
+        lv_obj_set_style_opa(btn, LV_OPA_40, LV_STATE_DISABLED);
+        lv_obj_set_ext_click_area(btn, 10);
+        lv_obj_add_event_cb(btn, on_step, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<intptr_t>(step)));
+        *label = lv_label_create(btn);
+        lv_obj_set_style_text_font(*label, &lv_font_montserrat_24, 0);
+        lv_label_set_text(*label, symbol);
+        lv_obj_center(*label);
+        return btn;
+    };
+    s_prev_btn = step_button(s_overlay, LV_SYMBOL_PREV, -1, &s_prev_label);
+    s_next_btn = step_button(s_overlay, LV_SYMBOL_NEXT, 1, &s_next_label);
+
     s_time = lv_label_create(s_overlay);
     lv_obj_set_style_text_font(s_time, phone_font_by_size(16), 0);
     lv_obj_set_style_bg_color(s_time, lv_color_black(), 0);
@@ -798,12 +956,9 @@ void build_ui()
     lv_obj_set_style_radius(s_time, 10, 0);
     lv_obj_set_style_pad_hor(s_time, 10, 0);
     lv_obj_set_style_pad_ver(s_time, 3, 0);
-    lv_obj_align(s_time, LV_ALIGN_BOTTOM_MID, 0, -64);
     lv_label_set_text(s_time, "0:00 / 0:00");
 
     s_bar = lv_slider_create(s_overlay);
-    lv_obj_set_size(s_bar, root_w - 48, 6);
-    lv_obj_align(s_bar, LV_ALIGN_BOTTOM_MID, 0, -48);
     lv_slider_set_range(s_bar, 0, 1000);
     lv_obj_set_ext_click_area(s_bar, 16);
     lv_obj_set_style_bg_color(s_bar, lv_color_hex(0x3A444E), 0);
@@ -813,11 +968,12 @@ void build_ui()
     lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_RELEASED, nullptr);
     lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_PRESS_LOST, nullptr);
+    layout_controls(false);
 }
 
 bool alloc_out()
 {
-    s_out_size = align_up(static_cast<size_t>(s_area_w) * s_area_h * 2);
+    s_out_size = align_up(static_cast<size_t>(BSP_LCD_H_RES) * BSP_LCD_V_RES * 2);     // full screen
     for (auto &buf : s_out) {
         if (!buf) {
             buf = static_cast<uint8_t *>(heap_caps_aligned_calloc(ALIGN, 1, s_out_size, MALLOC_CAP_SPIRAM));
@@ -864,6 +1020,7 @@ bool PhoneVideo::run()
     if (!s_done) {
         s_done = xSemaphoreCreateBinary();
     }
+    s_status_bar = getSystem()->getDisplay().getStatusBar();
     build_ui();
     if (!alloc_out()) {
         ESP_LOGE(TAG, "no memory for the picture");
@@ -901,6 +1058,7 @@ bool PhoneVideo::close()
 /* In the background: playback pauses */
 bool PhoneVideo::pause()
 {
+    set_full(false);
     if (s_state == ST_PLAYING) {
         s_paused = true;
     }
