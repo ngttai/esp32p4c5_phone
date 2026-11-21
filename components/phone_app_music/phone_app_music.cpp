@@ -11,12 +11,16 @@
  *   the speaker codec. It keeps playing while the app is in the background and while the screen
  *   is off; closing the app stops it. The volume is the phone volume, followed while playing.
  */
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <sys/stat.h>
+#include <unordered_set>
 #include <strings.h>
 #include <vector>
 #include "decoder/esp_audio_dec_default.h"
@@ -26,6 +30,7 @@
 #include "simple_dec/esp_audio_simple_dec.h"
 #include "simple_dec/esp_audio_simple_dec_default.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_pthread.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -48,6 +53,8 @@
 #define APP_NAME "Nhạc"
 
 extern "C" const lv_image_dsc_t phone_music_icon;
+extern "C" const lv_image_dsc_t phone_music_star;
+extern "C" const lv_image_dsc_t phone_music_star_outline;
 
 using namespace esp_brookesia::systems;
 
@@ -262,6 +269,86 @@ std::atomic<int> s_file_permille;       // position in the file, 0..1000
 std::atomic<int> s_elapsed;             // seconds of audio played
 std::atomic<bool> s_error;              // the last track could not be played
 std::atomic<int> s_repeat{REPEAT_OFF};
+std::atomic<int> s_seek{-1};            // position asked by the progress slider, 0..1000
+std::atomic<bool> s_seekable;           // the playing file can be sought (not M4A / OGG)
+
+/* Tracks in the order of the list on the screen (all, or the favorites only), and the order they
+ * play in: the same, or shuffled. Previous, next and the end of the list follow the play order.
+ * Written by the LVGL task, read by the player task. */
+std::mutex s_order_mtx;
+std::vector<int> s_order;
+std::vector<int> s_play;
+std::atomic<bool> s_shuffle;
+
+/* s_play from s_order: shuffled (each track once per round) with `first` at its head, or as
+ * listed. Called with s_order_mtx held. */
+void make_play_order_locked(int first)
+{
+    s_play = s_order;
+    if (!s_shuffle) {
+        return;
+    }
+    for (size_t i = s_play.size(); i > 1; i--) {
+        std::swap(s_play[i - 1], s_play[esp_random() % i]);
+    }
+    for (size_t i = 0; i < s_play.size(); i++) {
+        if (s_play[i] == first) {
+            std::swap(s_play[0], s_play[i]);
+            break;
+        }
+    }
+}
+
+void make_play_order(int first)
+{
+    std::lock_guard<std::mutex> lock(s_order_mtx);
+    make_play_order_locked(first);
+}
+
+/* Track after (step 1) or before (step -1) idx in the play order; -1 at an end unless wrap.
+ * Shuffled and wrapping at the end: a new round in a new order. */
+int order_step(int idx, int step, bool wrap)
+{
+    std::lock_guard<std::mutex> lock(s_order_mtx);
+    const int n = static_cast<int>(s_play.size());
+    if (n == 0) {
+        return -1;
+    }
+    int pos = -1;
+    for (int i = 0; i < n; i++) {
+        if (s_play[i] == idx) {
+            pos = i;
+            break;
+        }
+    }
+    if (pos < 0) {
+        if (s_shuffle) {
+            return step > 0 || wrap ? s_play[0] : -1;
+        }
+        /* not in the list (unmarked while only the favorites are shown): the next one after it */
+        for (int i = 0; i < n; i++) {
+            if (s_play[i] > idx) {
+                return step > 0 ? s_play[i] : (i > 0 ? s_play[i - 1] : (wrap ? s_play[n - 1] : -1));
+            }
+        }
+        return step > 0 ? (wrap ? s_play[0] : -1) : s_play[n - 1];
+    }
+    const int next = pos + step;
+    if (next >= 0 && next < n) {
+        return s_play[next];
+    }
+    if (!wrap) {
+        return -1;
+    }
+    if (s_shuffle && step > 0 && n > 1) {
+        make_play_order_locked(-1);
+        if (s_play[0] == idx) {             /* not the same track twice in a row */
+            std::swap(s_play[0], s_play[n - 1]);
+        }
+        return s_play[0];
+    }
+    return s_play[(next + n) % n];
+}
 
 bool has_ext(const char *path, const char *ext)
 {
@@ -292,6 +379,36 @@ bool interrupted()
     return s_stop || s_req >= 0;
 }
 
+/* Where the audio data starts: after the ID3v2 tag of an MP3, at the "data" chunk of a WAV
+ * (block_align is set for it), 0 otherwise */
+long audio_start(FILE *file, esp_audio_simple_dec_type_t type, int &block_align)
+{
+    block_align = 1;
+    uint8_t h[512];
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        return 0;
+    }
+    const size_t n = fread(h, 1, sizeof(h), file);
+    long start = 0;
+    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_MP3 && n >= 10 && memcmp(h, "ID3", 3) == 0) {
+        start = 10 + static_cast<long>(syncsafe32(h + 6)) + ((h[5] & 0x10) ? 10 : 0);
+    } else if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_WAV && n >= 12 && memcmp(h, "RIFF", 4) == 0) {
+        for (size_t i = 12; i + 8 <= n;) {
+            const uint32_t len = h[i + 4] | h[i + 5] << 8 | h[i + 6] << 16 | static_cast<uint32_t>(h[i + 7]) << 24;
+            if (memcmp(h + i, "fmt ", 4) == 0 && i + 22 <= n) {
+                block_align = h[i + 20] | h[i + 21] << 8;
+            } else if (memcmp(h + i, "data", 4) == 0) {
+                start = static_cast<long>(i + 8);
+                break;
+            }
+            i += 8 + ((len + 1) & ~1u);
+        }
+        block_align = block_align < 1 ? 1 : block_align;
+    }
+    fseek(file, 0, SEEK_SET);
+    return start;
+}
+
 void register_decoders()
 {
     esp_audio_dec_register_default();
@@ -320,11 +437,20 @@ bool play_file(const std::string &path)
     esp_audio_simple_dec_cfg_t cfg = {};
     cfg.dec_type = type_of(path.c_str());
     long size = 0;
+    long data_start = 0;
+    int block_align = 1;
+    /* MP3 and ADTS AAC are frame streams: after a jump the decoder is reset and finds the next
+     * frame. WAV and FLAC keep their decoder (a reset would wait for the file header again). */
+    const bool frame_stream = cfg.dec_type == ESP_AUDIO_SIMPLE_DEC_TYPE_MP3 || cfg.dec_type == ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+    long resync = 0;                    // input bytes after a jump in which decode errors are skipped
     if (file) {
         fseek(file, 0, SEEK_END);
         size = ftell(file);
-        fseek(file, 0, SEEK_SET);
+        data_start = audio_start(file, cfg.dec_type, block_align);
     }
+    s_seek = -1;
+    s_seekable = file && size > data_start && (frame_stream || cfg.dec_type == ESP_AUDIO_SIMPLE_DEC_TYPE_WAV ||
+                 cfg.dec_type == ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC);
 
     if (in && pcm && file && size > 0 && spk && esp_audio_simple_dec_open(&cfg, &dec) != ESP_AUDIO_ERR_OK) {
         /* The GMF player of the Radio app unregisters the default decoders when it is destroyed (its
@@ -340,15 +466,42 @@ bool play_file(const std::string &path)
     }
     ok = true;
     while (!interrupted()) {
+        const int seek = s_seek.exchange(-1);
+        if (seek >= 0 && s_seekable) {
+            /* jump by position in the file: exact for CBR, close for VBR */
+            const long pos = ftell(file);
+            long target = 0;
+            if (seek > 0) {
+                target = data_start + static_cast<long>(static_cast<int64_t>(size - data_start) * seek / 1000);
+                target = data_start + (target - data_start) / block_align * block_align;
+            }
+            music::TrackView view;
+            const uint32_t duration_ms = s_lib && s_lib->snapshot(s_cur, view) ? view.duration_ms : 0;
+            if (seek == 0) {
+                samples = 0;
+            } else if (duration_ms && rate) {
+                samples = static_cast<uint64_t>(duration_ms) * seek / 1000 * rate / 1000;
+            } else if (pos > data_start) {
+                samples = samples * static_cast<uint64_t>(target - data_start) / static_cast<uint64_t>(pos - data_start);
+            }
+            fseek(file, target, SEEK_SET);
+            if (seek == 0 || frame_stream) {
+                esp_audio_simple_dec_reset(dec);     /* from the start: every format takes it */
+            }
+            resync = seek == 0 ? 0 : 64 * 1024;
+            s_elapsed = rate ? static_cast<int>(samples / rate) : 0;
+            s_file_permille = seek;
+        }
         const size_t n = fread(in, 1, IN_SIZE, file);
         if (n == 0) {
             break;
         }
+        resync -= resync > 0 ? static_cast<long>(n) : 0;
         esp_audio_simple_dec_raw_t raw = {};
         raw.buffer = in;
         raw.len = n;
         raw.eos = feof(file) != 0;
-        while (raw.len > 0 && !interrupted()) {
+        while (raw.len > 0 && !interrupted() && s_seek < 0) {
             esp_audio_simple_dec_out_t out = {};
             out.buffer = pcm;
             out.len = pcm_size;
@@ -362,6 +515,9 @@ bool play_file(const std::string &path)
                 pcm = bigger;
                 pcm_size = out.needed_size;
                 continue;
+            }
+            if (err != ESP_AUDIO_ERR_OK && resync > 0) {
+                break;          /* landed inside a frame after a jump: drop this input and read on */
             }
             if (err != ESP_AUDIO_ERR_OK) {
                 ESP_LOGE(TAG, "decode error %d in %s", err, path.c_str());
@@ -408,8 +564,11 @@ bool play_file(const std::string &path)
                 volume = v;
                 esp_codec_dev_set_out_vol(spk, v);
             }
-            while (s_paused && !interrupted()) {
+            while (s_paused && !interrupted() && s_seek < 0) {
                 vTaskDelay(pdMS_TO_TICKS(40));
+            }
+            if (s_seek >= 0) {
+                break;          /* audio from before the jump is not played */
             }
             esp_codec_dev_write(spk, s, frames * 2);
             samples += frames;
@@ -472,10 +631,9 @@ void player_task(void *)
                 idx = -1;
             } else if (s_repeat == REPEAT_ONE) {
                 /* same track again */
-            } else if (idx + 1 < count) {
-                idx = idx + 1;
             } else {
-                idx = s_repeat == REPEAT_ALL ? 0 : -1;  /* end of the list */
+                /* next in the list on the screen; at its end, the first again or stop */
+                idx = count > 0 ? order_step(idx, 1, s_repeat == REPEAT_ALL) : -1;
             }
         }
         s_playing = false;
@@ -580,13 +738,73 @@ void start_library()
 /* ---- UI ---- */
 
 struct Row {
+    int idx;                // track of the library
     lv_obj_t *obj;
     lv_obj_t *number;
     lv_obj_t *title;
     lv_obj_t *artist;
     lv_obj_t *duration;
+    lv_obj_t *star;
     music::MetaState shown;
 };
+
+/* ---- favorites: one path per line, relative to the card, in a text file of the card ---- */
+
+constexpr const char *FAV_DIR = "/sdcard/Music";
+constexpr const char *FAV_FILE = "/sdcard/Music/favorites.txt";
+std::unordered_set<std::string> s_favs;
+bool s_only_fav;                // the list shows the favorites only
+
+std::string rel_path(const std::string &path)
+{
+    const size_t root = strlen(CARD);
+    return path.compare(0, root, CARD) == 0 && path.size() > root + 1 ? path.substr(root + 1) : path;
+}
+
+void load_favorites()
+{
+    s_favs.clear();
+    FILE *f = fopen(FAV_FILE, "r");
+    if (!f) {
+        return;
+    }
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) {
+            line[--n] = '\0';
+        }
+        const char *p = line[0] == '/' ? line + 1 : line;
+        if (*p && *p != '#') {
+            s_favs.insert(p);
+        }
+    }
+    fclose(f);
+}
+
+bool save_favorites()
+{
+    std::vector<std::string> lines(s_favs.begin(), s_favs.end());
+    std::sort(lines.begin(), lines.end());
+    mkdir(FAV_DIR, 0775);
+    FILE *f = fopen(FAV_FILE, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "cannot write %s", FAV_FILE);
+        return false;
+    }
+    bool ok = true;
+    for (const auto &l : lines) {
+        ok = ok && fprintf(f, "%s\n", l.c_str()) > 0;
+    }
+    ok = fclose(f) == 0 && ok;
+    return ok;
+}
+
+bool is_fav(int idx)
+{
+    std::string path;
+    return s_lib && idx >= 0 && s_lib->path(idx, path) && s_favs.count(rel_path(path)) != 0;
+}
 
 lv_obj_t *s_root;
 lv_obj_t *s_title;
@@ -597,9 +815,14 @@ lv_obj_t *s_art;
 lv_obj_t *s_art_primary;
 lv_obj_t *s_art_secondary;
 lv_obj_t *s_cover_img;
-lv_obj_t *s_bar;
+lv_obj_t *s_bar;                // progress slider, 0..1000
 lv_obj_t *s_play_label;
 lv_obj_t *s_repeat_label;
+lv_obj_t *s_repeat_tag;         // "ALL" or "1" right of the repeat icon
+lv_obj_t *s_shuffle_label;
+lv_obj_t *s_filter_label;
+bool s_dragging;                // the progress slider is held
+std::vector<int> s_row_of;      // row of each track of the library, -1 when not in the list
 lv_obj_t *s_list;
 lv_obj_t *s_empty;
 std::vector<Row> s_rows;
@@ -609,24 +832,93 @@ int s_shown_cur = -2;
 int s_shown_state = -1;
 uint32_t s_cur_duration_ms;
 
+std::string path_of(int idx)
+{
+    std::string path;
+    if (s_lib) {
+        s_lib->path(idx, path);
+    }
+    return path;
+}
+
+/* m:ss, or h:mm:ss from one hour on (mixes of two hours and more) */
 void format_time(char *buf, size_t len, uint32_t seconds)
 {
-    snprintf(buf, len, "%u:%02u", static_cast<unsigned>(seconds / 60), static_cast<unsigned>(seconds % 60));
+    if (seconds >= 3600) {
+        snprintf(buf, len, "%u:%02u:%02u", static_cast<unsigned>(seconds / 3600), static_cast<unsigned>(seconds / 60 % 60),
+                 static_cast<unsigned>(seconds % 60));
+    } else {
+        snprintf(buf, len, "%u:%02u", static_cast<unsigned>(seconds / 60), static_cast<unsigned>(seconds % 60));
+    }
 }
 
 void on_row(lv_event_t *e)
 {
-    play_track(static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e))));
+    const int idx = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    if (s_shuffle) {
+        make_play_order(idx);       /* a new round that starts with the chosen track */
+    }
+    play_track(idx);
 }
+
+/* Star of a favorite: a fixed column just left of the duration column, so the durations stay
+ * at the right edge and the stars line up */
+constexpr int DURATION_W = 66;     // fits h:mm:ss
+constexpr int STAR_HIT_W = 36 + DURATION_W + 14;  // star column + durations + right margin
+void place_star(Row &r, bool fav)
+{
+    lv_image_set_src(r.star, fav ? &phone_music_star : &phone_music_star_outline);
+    lv_obj_set_style_image_recolor(r.star, lv_color_hex(fav ? COLOR_ACCENT : 0x5A6672), 0);
+}
+
+/* Mark or unmark a track; the file on the card is written at once. In the favorites list an
+ * unmarked track stays (outlined) until the list is built again: no rows jumping under the
+ * finger, and a wrong tap can be undone. */
+void toggle_fav(int idx)
+{
+    std::string path;
+    if (!s_lib || idx < 0 || !s_lib->path(idx, path)) {
+        return;
+    }
+    const std::string rel = rel_path(path);
+    if (!s_favs.erase(rel)) {
+        s_favs.insert(rel);
+    }
+    save_favorites();
+    if (idx < static_cast<int>(s_row_of.size()) && s_row_of[idx] >= 0) {
+        place_star(s_rows[s_row_of[idx]], s_favs.count(rel) != 0);
+    }
+}
+
+void on_row_star(lv_event_t *e)
+{
+    toggle_fav(static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e))));
+}
+
+void refresh_rows();
 
 void build_rows()
 {
     const int count = static_cast<int>(s_lib->count());
     const int width = lv_obj_get_width(s_list) - 24;
+    std::vector<int> order;
+    for (int i = 0; i < count; i++) {
+        if (!s_only_fav || is_fav(i)) {
+            order.push_back(i);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(s_order_mtx);
+        s_order = order;
+        make_play_order_locked(s_cur);
+    }
     lv_obj_clean(s_list);
     s_rows.clear();
-    for (int i = 0; i < count; i++) {
+    s_row_of.assign(count, -1);
+    for (size_t pos = 0; pos < order.size(); pos++) {
+        const int i = order[pos];
         Row r = {};
+        r.idx = i;
         r.shown = music::MetaState::Pending;
         r.obj = lv_button_create(s_list);
         lv_obj_remove_style_all(r.obj);
@@ -641,14 +933,14 @@ void build_rows()
         r.number = lv_label_create(r.obj);
         lv_obj_set_style_text_color(r.number, lv_color_hex(COLOR_SUB), 0);
         lv_obj_set_style_text_font(r.number, phone_font_by_size(16), 0);
-        lv_label_set_text_fmt(r.number, "%02d", i + 1);
+        lv_label_set_text_fmt(r.number, "%02d", static_cast<int>(pos) + 1);
         lv_obj_align(r.number, LV_ALIGN_LEFT_MID, 14, 0);
 
         music::TrackView view;
         s_lib->snapshot(i, view);
         r.title = lv_label_create(r.obj);
         lv_label_set_long_mode(r.title, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_width(r.title, width - 54 - 70);
+        lv_obj_set_width(r.title, width - 54 - STAR_HIT_W - 6);
         lv_obj_set_height(r.title, lv_font_get_line_height(phone_font_by_size(20)));
         lv_label_set_text(r.title, view.title);
         lv_obj_align(r.title, LV_ALIGN_LEFT_MID, 54, 0);
@@ -657,7 +949,7 @@ void build_rows()
         lv_obj_set_style_text_color(r.artist, lv_color_hex(COLOR_SUB), 0);
         lv_obj_set_style_text_font(r.artist, phone_font_by_size(14), 0);
         lv_label_set_long_mode(r.artist, LV_LABEL_LONG_MODE_DOTS);
-        lv_obj_set_width(r.artist, width - 54 - 70);
+        lv_obj_set_width(r.artist, width - 54 - STAR_HIT_W - 6);
         lv_obj_set_height(r.artist, lv_font_get_line_height(phone_font_by_size(14)));
         lv_label_set_text(r.artist, "");
         lv_obj_align(r.artist, LV_ALIGN_LEFT_MID, 54, 14);
@@ -667,30 +959,60 @@ void build_rows()
         lv_obj_set_style_text_color(r.duration, lv_color_hex(COLOR_SUB), 0);
         lv_obj_set_style_text_font(r.duration, phone_font_by_size(16), 0);
         lv_label_set_text(r.duration, "");
+        lv_obj_set_width(r.duration, DURATION_W);
+        lv_obj_set_style_text_align(r.duration, LV_TEXT_ALIGN_RIGHT, 0);
         lv_obj_align(r.duration, LV_ALIGN_RIGHT_MID, -14, 0);
+
+        /* star in its column left of the durations: filled for a favorite, outlined otherwise;
+         * a tap on it marks or unmarks the track (not played) */
+        /* the whole right end of the row, from the star to the edge and the row's full height, is
+         * the target of the star (on top of the duration, which it covers) */
+        lv_obj_t *hit = lv_obj_create(r.obj);
+        lv_obj_remove_style_all(hit);
+        lv_obj_set_size(hit, STAR_HIT_W, LV_PCT(100));
+        lv_obj_align(hit, LV_ALIGN_RIGHT_MID, 0, 0);
+        lv_obj_remove_flag(hit, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_radius(hit, 12, 0);
+        lv_obj_set_style_bg_color(hit, lv_color_white(), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(hit, LV_OPA_10, LV_STATE_PRESSED);
+        lv_obj_add_event_cb(hit, on_row_star, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        r.star = lv_image_create(hit);
+        lv_image_set_scale(r.star, 160);       /* 32 px -> 20 px */
+        lv_obj_set_style_image_recolor_opa(r.star, LV_OPA_COVER, 0);
+        lv_obj_remove_flag(r.star, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(r.star, LV_ALIGN_LEFT_MID, 2, 0);   /* 32 px box, 20 px star in its middle */
+        place_star(r, s_favs.count(rel_path(path_of(i))) != 0);
+        s_row_of[i] = static_cast<int>(s_rows.size());
         s_rows.push_back(r);
     }
     if (count == 0) {
         lv_label_set_text(s_empty, T("Chưa có nhạc.\nChép tệp MP3, WAV, FLAC, AAC\nvào thư mục Music trên thẻ nhớ.",
                                      "No music yet.\nCopy MP3, WAV, FLAC or AAC files\nto the Music folder of the card."));
         lv_obj_remove_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
+    } else if (order.empty()) {
+        lv_label_set_text(s_empty, T("Chưa có bài yêu thích.\nBấm nút ngôi sao khi đang phát\nđể thêm bài vào đây.",
+                                     "No favorites yet.\nTap the star while a track plays\nto add it here."));
+        lv_obj_remove_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_empty, LV_OBJ_FLAG_HIDDEN);
     }
     s_rows_built = true;
     s_shown_cur = -2;
+    /* new rows start empty: fill in the tags already read (the library version does not change
+     * for them, so the timer would never do it: no durations after switching the filter) */
+    s_seen_version = s_lib->version();
+    refresh_rows();
 }
 
 /* Fill in the rows whose tag has been read since the last time */
 void refresh_rows()
 {
-    for (size_t i = 0; i < s_rows.size(); i++) {
-        Row &r = s_rows[i];
+    for (Row &r : s_rows) {
         if (r.shown != music::MetaState::Pending) {
             continue;
         }
         music::TrackView view;
-        if (!s_lib->snapshot(i, view) || view.state == music::MetaState::Pending) {
+        if (!s_lib->snapshot(r.idx, view) || view.state == music::MetaState::Pending) {
             continue;
         }
         r.shown = view.state;
@@ -721,7 +1043,7 @@ void update_wanted()
     for (size_t k = 0; k < count && n < music::Service::kMaxWanted; k++) {
         const size_t i = (first + k) % count;
         if (s_rows[i].shown == music::MetaState::Pending) {
-            wanted[n++] = i;
+            wanted[n++] = static_cast<size_t>(s_rows[i].idx);
         }
     }
     s_lib->set_wanted(wanted, n);
@@ -735,13 +1057,14 @@ void set_artwork(const Palette &p)
     lv_obj_set_style_bg_color(s_art_secondary, lv_color_hex(p.secondary), 0);
 }
 
-/* Current row: accent border, a note instead of its number */
+/* Current row: accent border, a note instead of its number (index: track of the library) */
 void mark_row(int index, bool current)
 {
-    if (index < 0 || index >= static_cast<int>(s_rows.size())) {
+    if (index < 0 || index >= static_cast<int>(s_row_of.size()) || s_row_of[index] < 0) {
         return;
     }
-    Row &r = s_rows[index];
+    const int pos = s_row_of[index];
+    Row &r = s_rows[pos];
     lv_obj_set_style_bg_color(r.obj, lv_color_hex(current ? COLOR_ROW_CUR : COLOR_ROW), 0);
     lv_obj_set_style_border_width(r.obj, current ? 2 : 0, 0);
     lv_obj_set_style_text_color(r.title, current ? lv_color_hex(COLOR_ACCENT) : lv_color_white(), 0);
@@ -749,7 +1072,7 @@ void mark_row(int index, bool current)
     if (current) {
         lv_label_set_text(r.number, LV_SYMBOL_AUDIO);
     } else {
-        lv_label_set_text_fmt(r.number, "%02d", index + 1);
+        lv_label_set_text_fmt(r.number, "%02d", pos + 1);
     }
 }
 
@@ -757,7 +1080,7 @@ void show_current(int cur)
 {
     mark_row(s_shown_cur, false);
     s_cur_duration_ms = 0;
-    if (cur >= 0 && cur < static_cast<int>(s_rows.size())) {
+    if (s_lib && cur >= 0 && cur < static_cast<int>(s_lib->count())) {
         mark_row(cur, true);
         s_lib->set_pinned(cur);
         set_artwork(PALETTES[cur % PALETTE_COUNT]);
@@ -834,8 +1157,10 @@ void on_timer(lv_timer_t *)
         refresh_now_playing(cur);
         const uint32_t t = s_elapsed;
         char buf[16];
-        format_time(buf, sizeof(buf), t);
-        lv_label_set_text(s_time, buf);
+        if (!s_dragging) {          /* while dragging it shows the time under the finger */
+            format_time(buf, sizeof(buf), t);
+            lv_label_set_text(s_time, buf);
+        }
         if (!playing && s_error) {
             lv_label_set_text(s_artist, T("Không phát được tệp này", "Cannot play this file"));
         }
@@ -850,7 +1175,70 @@ void on_timer(lv_timer_t *)
         if (s_cur_duration_ms) {
             permille = static_cast<int>(static_cast<uint64_t>(t) * 1000000ULL / s_cur_duration_ms);
         }
-        lv_bar_set_value(s_bar, permille > 1000 ? 1000 : permille, LV_ANIM_OFF);
+        if (!s_dragging && s_seek < 0) {
+            lv_slider_set_value(s_bar, permille > 1000 ? 1000 : permille, LV_ANIM_OFF);
+        }
+    }
+    /* the slider moves the playback only while a file that can be sought plays */
+    const bool can_seek = playing && s_seekable;
+    if (can_seek != !lv_obj_has_state(s_bar, LV_STATE_DISABLED)) {
+        if (can_seek) {
+            lv_obj_remove_state(s_bar, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_bar, LV_STATE_DISABLED);
+            s_dragging = false;
+        }
+    }
+}
+
+/* Progress slider: the time under the finger while dragging, the jump when it is let go */
+void on_seek(lv_event_t *e)
+{
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        s_dragging = true;
+    } else if (code == LV_EVENT_VALUE_CHANGED && s_dragging && s_cur_duration_ms) {
+        char buf[16];
+        const uint64_t ms = static_cast<uint64_t>(lv_slider_get_value(s_bar)) * s_cur_duration_ms / 1000;
+        format_time(buf, sizeof(buf), static_cast<uint32_t>(ms / 1000));
+        lv_label_set_text(s_time, buf);
+    } else if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) && s_dragging) {
+        s_dragging = false;
+        if (s_playing && s_seekable) {
+            s_seek = lv_slider_get_value(s_bar);
+        }
+    }
+}
+
+void show_shuffle()
+{
+    lv_obj_set_style_text_color(s_shuffle_label, lv_color_hex(s_shuffle ? COLOR_ACCENT : COLOR_SUB), 0);
+}
+
+/* Shuffle on: a new order of the list, from the current track on */
+void on_shuffle(lv_event_t *)
+{
+    s_shuffle = !s_shuffle;
+    phone_pref_set("mus_shuf", s_shuffle ? 1 : 0);
+    make_play_order(s_cur);
+    show_shuffle();
+}
+
+void show_filter()
+{
+    lv_label_set_text(s_filter_label, s_only_fav ? T(LV_SYMBOL_LIST "  Yêu thích", LV_SYMBOL_LIST "  Favorites")
+                      : T(LV_SYMBOL_LIST "  Tất cả", LV_SYMBOL_LIST "  All"));
+    lv_obj_set_style_text_color(s_filter_label, lv_color_hex(s_only_fav ? COLOR_ACCENT : COLOR_SUB), 0);
+}
+
+/* All tracks / the favorites only */
+void on_filter(lv_event_t *)
+{
+    s_only_fav = !s_only_fav;
+    phone_pref_set("mus_fav", s_only_fav ? 1 : 0);
+    show_filter();
+    if (s_rows_built) {
+        build_rows();
     }
 }
 
@@ -861,33 +1249,37 @@ void on_play(lv_event_t *)
     }
     if (s_playing) {
         s_paused = !s_paused;
+    } else if (s_cur >= 0) {
+        play_track(s_cur);
     } else {
-        play_track(s_cur >= 0 ? static_cast<int>(s_cur) : 0);
+        play_track(order_step(-1, 1, false));       /* the first of the list */
     }
 }
 
+/* Previous and next follow the list on the screen (all tracks or the favorites) */
 void on_prev(lv_event_t *)
 {
     const int cur = s_cur;
-    play_track(cur > 0 ? cur - 1 : 0);
+    const int prev = cur >= 0 ? order_step(cur, -1, false) : -1;
+    play_track(prev >= 0 ? prev : (cur >= 0 ? cur : order_step(-1, 1, false)));
 }
 
 void on_next(lv_event_t *)
 {
-    const int cur = s_cur;
-    const int count = s_lib ? static_cast<int>(s_lib->count()) : 0;
-    if (cur + 1 < count) {
-        play_track(cur + 1);
-    } else if (count > 0 && s_repeat == REPEAT_ALL) {
-        play_track(0);
+    const int next = order_step(s_cur, 1, s_repeat == REPEAT_ALL);
+    if (next >= 0) {
+        play_track(next);
     }
 }
 
+/* The icon stays in place; "ALL" (whole list) or "1" (this track) in small letters right of it */
 void show_repeat()
 {
     const int mode = s_repeat;
-    lv_label_set_text(s_repeat_label, mode == REPEAT_ONE ? LV_SYMBOL_LOOP " 1" : LV_SYMBOL_LOOP);
-    lv_obj_set_style_text_color(s_repeat_label, lv_color_hex(mode == REPEAT_OFF ? COLOR_SUB : COLOR_ACCENT), 0);
+    const lv_color_t color = lv_color_hex(mode == REPEAT_OFF ? COLOR_SUB : COLOR_ACCENT);
+    lv_obj_set_style_text_color(s_repeat_label, color, 0);
+    lv_obj_set_style_text_color(s_repeat_tag, color, 0);
+    lv_label_set_text(s_repeat_tag, mode == REPEAT_ALL ? "ALL" : (mode == REPEAT_ONE ? "1" : ""));
 }
 
 /* off, whole list, one track */
@@ -1017,22 +1409,35 @@ void build_ui()
     s_time = lv_label_create(card);
     lv_obj_set_style_text_color(s_time, lv_color_hex(COLOR_SUB), 0);
     lv_obj_set_style_text_font(s_time, phone_font_by_size(16), 0);
-    lv_obj_set_width(s_time, 52);
+    lv_obj_set_width(s_time, 64);       /* h:mm:ss */
     lv_obj_set_style_text_align(s_time, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_align(s_time, LV_ALIGN_TOP_LEFT, 8, line_y);
     lv_label_set_text(s_time, "0:00");
     s_duration = lv_label_create(card);
     lv_obj_set_style_text_color(s_duration, lv_color_hex(COLOR_SUB), 0);
     lv_obj_set_style_text_font(s_duration, phone_font_by_size(16), 0);
-    lv_obj_set_width(s_duration, 52);
+    lv_obj_set_width(s_duration, 64);
     lv_obj_align(s_duration, LV_ALIGN_TOP_RIGHT, -8, line_y);
     lv_label_set_text(s_duration, "--:--");
-    s_bar = lv_bar_create(card);
-    lv_obj_set_size(s_bar, root_w - 24 - 2 * 72, 6);
+    /* progress, dragged to jump (MP3, AAC, WAV, FLAC); the knob shows only while it can be dragged */
+    s_dragging = false;
+    s_bar = lv_slider_create(card);
+    lv_obj_set_size(s_bar, root_w - 24 - 2 * 84, 6);
     lv_obj_align(s_bar, LV_ALIGN_TOP_MID, 0, line_y + 8);
-    lv_bar_set_range(s_bar, 0, 1000);
+    lv_slider_set_range(s_bar, 0, 1000);
+    lv_obj_set_ext_click_area(s_bar, 16);
+    lv_obj_add_flag(s_bar, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     lv_obj_set_style_bg_color(s_bar, lv_color_hex(0x3A444E), 0);
     lv_obj_set_style_bg_color(s_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_bar, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_bar, 5, LV_PART_KNOB);
+    lv_obj_set_style_opa(s_bar, LV_OPA_TRANSP, LV_PART_KNOB | LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(s_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR | LV_STATE_DISABLED);
+    lv_obj_add_state(s_bar, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_PRESS_LOST, nullptr);
 
     /* repeat, previous, play / pause, next */
     lv_obj_align(round_button(card, LV_SYMBOL_PREV, 60, 0x2A333C, on_prev), LV_ALIGN_BOTTOM_MID, -92, -22);
@@ -1046,8 +1451,40 @@ void build_ui()
     lv_obj_align(repeat, LV_ALIGN_BOTTOM_LEFT, 10, -28);
     lv_obj_add_event_cb(repeat, on_repeat, LV_EVENT_CLICKED, nullptr);
     s_repeat_label = lv_label_create(repeat);
-    lv_obj_center(s_repeat_label);
+    lv_label_set_text(s_repeat_label, LV_SYMBOL_LOOP);
+    lv_obj_align(s_repeat_label, LV_ALIGN_LEFT_MID, 8, 0);
+    s_repeat_tag = lv_label_create(repeat);
+    lv_obj_set_style_text_font(s_repeat_tag, phone_font_by_size(12), 0);
+    lv_label_set_text(s_repeat_tag, "");
+    lv_obj_align(s_repeat_tag, LV_ALIGN_LEFT_MID, 38, 1);
     show_repeat();
+
+    /* shuffle, opposite the repeat button */
+    lv_obj_t *shuffle = lv_button_create(card);
+    lv_obj_remove_style_all(shuffle);
+    lv_obj_set_size(shuffle, 64, 48);
+    lv_obj_set_ext_click_area(shuffle, 8);
+    lv_obj_align(shuffle, LV_ALIGN_BOTTOM_RIGHT, -10, -28);
+    lv_obj_set_style_opa(shuffle, LV_OPA_60, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(shuffle, on_shuffle, LV_EVENT_CLICKED, nullptr);
+    s_shuffle_label = lv_label_create(shuffle);
+    lv_label_set_text(s_shuffle_label, LV_SYMBOL_SHUFFLE);
+    lv_obj_center(s_shuffle_label);
+    show_shuffle();
+
+    /* list filter: all tracks or the favorites only */
+    lv_obj_t *filter = lv_button_create(card);
+    lv_obj_remove_style_all(filter);
+    lv_obj_set_size(filter, LV_SIZE_CONTENT, 40);
+    lv_obj_set_style_pad_hor(filter, 10, 0);
+    lv_obj_set_ext_click_area(filter, 6);
+    lv_obj_align(filter, LV_ALIGN_TOP_LEFT, 6, 8);
+    lv_obj_set_style_opa(filter, LV_OPA_60, LV_STATE_PRESSED);
+    lv_obj_add_event_cb(filter, on_filter, LV_EVENT_CLICKED, nullptr);
+    s_filter_label = lv_label_create(filter);
+    lv_obj_set_style_text_font(s_filter_label, phone_font_by_size(16), 0);
+    lv_obj_center(s_filter_label);
+    show_filter();
 
     /* track list; it ends above the strip where the swipe-up for the navigation bar starts */
     s_list = lv_obj_create(root);
@@ -1101,6 +1538,15 @@ bool PhoneMusic::run()
     s_error = false;
     const int repeat = phone_pref_get("mus_rep", REPEAT_OFF);
     s_repeat = repeat >= 0 && repeat < REPEAT_COUNT ? repeat : REPEAT_OFF;
+    s_only_fav = phone_pref_get("mus_fav", 0) != 0;
+    s_shuffle = phone_pref_get("mus_shuf", 0) != 0;
+    load_favorites();
+    {
+        std::lock_guard<std::mutex> lock(s_order_mtx);
+        s_order.clear();
+        s_play.clear();
+    }
+    s_row_of.clear();
     retire_library();
     start_library();
     s_cover_buf_size = (static_cast<size_t>(ART) * ART * 2 + COVER_ALIGN - 1) & ~static_cast<size_t>(COVER_ALIGN - 1);

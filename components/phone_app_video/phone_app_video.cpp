@@ -196,6 +196,44 @@ std::atomic<int> s_state{ST_IDLE};
 std::atomic<uint32_t> s_frame;
 std::atomic<uint32_t> s_total;
 std::atomic<uint32_t> s_usec_per_frame{50000};
+std::atomic<int> s_seek{-1};            // position asked by the progress slider, 0..1000
+bool s_dragging;                        // the progress slider is held (LVGL task)
+
+/* Find the first video chunk at or after the current position of the file (a jump lands anywhere in
+ * the "movi" list): its header "NNdc"/"NNdb" with a size that fits and JPEG data after it. Leaves
+ * the file at that header. */
+bool find_video_chunk(const Avi &avi)
+{
+    constexpr size_t WIN = 16 * 1024;
+    auto *buf = static_cast<uint8_t *>(malloc(WIN + 12));
+    if (!buf) {
+        return false;
+    }
+    const char d0 = static_cast<char>('0' + avi.video_stream / 10), d1 = static_cast<char>('0' + avi.video_stream % 10);
+    long base = ftell(avi.file);
+    bool found = false;
+    while (!found && base + 12 <= avi.movi_end) {
+        fseek(avi.file, base, SEEK_SET);
+        const size_t n = fread(buf, 1, WIN + 12, avi.file);
+        if (n < 12) {
+            break;
+        }
+        for (size_t i = 0; i + 12 <= n; i++) {
+            if (buf[i] == d0 && buf[i + 1] == d1 && buf[i + 2] == 'd' && (buf[i + 3] == 'c' || buf[i + 3] == 'b') &&
+                    buf[i + 8] == 0xFF && buf[i + 9] == 0xD8) {
+                const uint32_t size = le32(buf + i + 4);
+                if (size > 0 && size <= FRAME_MAX && base + static_cast<long>(i) + 8 + static_cast<long>(size) <= avi.movi_end) {
+                    fseek(avi.file, base + static_cast<long>(i), SEEK_SET);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        base += WIN;
+    }
+    free(buf);
+    return found;
+}
 
 size_t align_up(size_t n)
 {
@@ -228,6 +266,7 @@ void player_task(void *)
     bool turned = false;
     int back = 0, bad_frames = 0;
     uint32_t frame = 0;
+    bool step_one = false;          // a jump while paused: show its first frame, then hold
     int64_t start_us = 0;
     bool ok = false;
     const jpeg_decode_memory_alloc_cfg_t in_cfg = {.buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER};
@@ -269,7 +308,21 @@ void player_task(void *)
     start_us = esp_timer_get_time();
     fseek(avi.file, avi.movi_start, SEEK_SET);
     while (!s_stop) {
-        if (s_paused || phone_lock_is_locked()) {
+        const int seek = s_seek.exchange(-1);
+        if (seek >= 0) {
+            /* jump by position in the movi list, then to the next video chunk; the sound follows
+             * the chunks after it. MJPEG frames all stand alone, so any of them can start. */
+            const long target = avi.movi_start + static_cast<long>(static_cast<int64_t>(avi.movi_end - avi.movi_start) * seek / 1000);
+            fseek(avi.file, target, SEEK_SET);
+            if (seek == 0 || !find_video_chunk(avi)) {
+                fseek(avi.file, seek == 0 ? avi.movi_start : avi.movi_end, SEEK_SET);
+            }
+            frame = static_cast<uint32_t>(static_cast<uint64_t>(avi.total_frames) * seek / 1000);
+            s_frame = frame;
+            start_us = esp_timer_get_time() - static_cast<int64_t>(frame) * avi.usec_per_frame;
+            step_one = s_paused;
+        }
+        if ((s_paused && !step_one) || phone_lock_is_locked()) {
             /* hold the clock while paused or while the lock screen is up */
             const int64_t t0 = esp_timer_get_time();
             vTaskDelay(pdMS_TO_TICKS(40));
@@ -357,6 +410,7 @@ void player_task(void *)
                                 }
                                 bsp_display_unlock();
                             }
+                            step_one = false;
                         }
                         bad_frames = 0;
                     } else if (++bad_frames > 10) {
@@ -366,7 +420,7 @@ void player_task(void *)
                     }
                 }
             }
-        } else if (is_audio && spk_open && size > 0 && size <= AUDIO_MAX) {
+        } else if (is_audio && spk_open && !step_one && size > 0 && size <= AUDIO_MAX) {
             if (size > audio_size) {
                 free(audio);
                 audio = static_cast<uint8_t *>(malloc(size));
@@ -463,7 +517,9 @@ void open_video(int index)
     s_shown_state = -1;
     lv_label_set_text(s_title, name_of(s_path).c_str());
     lv_label_set_text(s_message, "");
-    lv_bar_set_value(s_bar, 0, LV_ANIM_OFF);
+    lv_slider_set_value(s_bar, 0, LV_ANIM_OFF);
+    s_seek = -1;
+    s_dragging = false;
     lv_image_set_src(s_img, nullptr);
     lv_obj_remove_flag(s_player, LV_OBJ_FLAG_HIDDEN);
     show_overlay();
@@ -487,6 +543,22 @@ void on_play(lv_event_t *)
     show_overlay();
 }
 
+/* Progress slider: jumps when it is let go */
+void on_seek(lv_event_t *e)
+{
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        s_dragging = true;
+        show_overlay();
+    } else if ((code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) && s_dragging) {
+        s_dragging = false;
+        if (s_state == ST_PLAYING) {
+            s_seek = lv_slider_get_value(s_bar);
+        }
+        show_overlay();
+    }
+}
+
 /* A tap on the picture shows or hides the controls */
 void on_tap(lv_event_t *)
 {
@@ -495,6 +567,25 @@ void on_tap(lv_event_t *)
     } else {
         lv_obj_add_flag(s_overlay, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+/* m:ss, or h:mm:ss from one hour on */
+void format_time(char *buf, size_t len, uint32_t seconds)
+{
+    if (seconds >= 3600) {
+        snprintf(buf, len, "%u:%02u:%02u", static_cast<unsigned>(seconds / 3600), static_cast<unsigned>(seconds / 60 % 60),
+                 static_cast<unsigned>(seconds % 60));
+    } else {
+        snprintf(buf, len, "%u:%02u", static_cast<unsigned>(seconds / 60), static_cast<unsigned>(seconds % 60));
+    }
+}
+
+void show_time(uint32_t at, uint32_t all)
+{
+    char a[16], b[16];
+    format_time(a, sizeof(a), at);
+    format_time(b, sizeof(b), all);
+    lv_label_set_text_fmt(s_time, "%s / %s", a, b);
 }
 
 void on_timer(lv_timer_t *)
@@ -522,9 +613,15 @@ void on_timer(lv_timer_t *)
     const uint32_t upf = s_usec_per_frame;
     const uint32_t sec = static_cast<uint32_t>(static_cast<uint64_t>(frame) * upf / 1000000);
     const uint32_t all = static_cast<uint32_t>(static_cast<uint64_t>(total) * upf / 1000000);
-    lv_label_set_text_fmt(s_time, "%u:%02u / %u:%02u", static_cast<unsigned>(sec / 60), static_cast<unsigned>(sec % 60),
-                          static_cast<unsigned>(all / 60), static_cast<unsigned>(all % 60));
-    lv_bar_set_value(s_bar, total ? static_cast<int>(static_cast<uint64_t>(frame) * 1000 / total) : 0, LV_ANIM_OFF);
+    show_time(sec, all);
+    if (!s_dragging && s_seek < 0) {
+        lv_slider_set_value(s_bar, total ? static_cast<int>(static_cast<uint64_t>(frame) * 1000 / total) : 0, LV_ANIM_OFF);
+    } else if (s_dragging) {
+        /* the time under the finger */
+        const uint32_t at = static_cast<uint32_t>(static_cast<uint64_t>(all) * lv_slider_get_value(s_bar) / 1000);
+        show_time(at, all);
+        show_overlay();
+    }
 
     if (state == ST_PLAYING && !paused && !phone_lock_is_locked() && lv_obj_get_screen(s_root) == lv_screen_active()) {
         lv_display_trigger_activity(nullptr);       /* being watched: keep the screen on */
@@ -704,12 +801,18 @@ void build_ui()
     lv_obj_align(s_time, LV_ALIGN_BOTTOM_MID, 0, -64);
     lv_label_set_text(s_time, "0:00 / 0:00");
 
-    s_bar = lv_bar_create(s_overlay);
+    s_bar = lv_slider_create(s_overlay);
     lv_obj_set_size(s_bar, root_w - 48, 6);
     lv_obj_align(s_bar, LV_ALIGN_BOTTOM_MID, 0, -48);
-    lv_bar_set_range(s_bar, 0, 1000);
+    lv_slider_set_range(s_bar, 0, 1000);
+    lv_obj_set_ext_click_area(s_bar, 16);
     lv_obj_set_style_bg_color(s_bar, lv_color_hex(0x3A444E), 0);
     lv_obj_set_style_bg_color(s_bar, lv_color_hex(COLOR_ACCENT), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_bar, lv_color_white(), LV_PART_KNOB);
+    lv_obj_set_style_pad_all(s_bar, 5, LV_PART_KNOB);
+    lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_RELEASED, nullptr);
+    lv_obj_add_event_cb(s_bar, on_seek, LV_EVENT_PRESS_LOST, nullptr);
 }
 
 bool alloc_out()
