@@ -22,6 +22,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "assistant_mcp.h"
+#include "assistant_wake.h"
 #include "esp_mcp_engine.h"
 #include "esp_xiaozhi_chat.h"
 #include "freertos/FreeRTOS.h"
@@ -80,6 +81,8 @@ bool s_talking;                             // a conversation is open: codecs ar
 bool s_answer_done;                         // the server finished the answer; listen again once it has been played
 bool s_goodbye;                             // the server ended the conversation; stop once the answer has been played
 bool s_connected;                           // link to the server, as last reported
+bool s_wake;                                // the wake word model is loaded; the idle microphone listens for it
+int16_t *s_wake_buf;
 void *s_enc;
 int s_enc_in, s_enc_out;
 uint8_t *s_enc_buf;
@@ -246,8 +249,9 @@ void play_task(void *)
         esp_opus_dec_close(dec);
     }
     free(pcm);
+    ESP_LOGD(TAG, "play task: %u bytes of stack left", (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     s_player_done = true;
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 /* ---- session task ---- */
@@ -289,10 +293,12 @@ bool open_codecs()
         esp_codec_dev_set_out_vol(s_spk, phone_audio_get_volume());
     }
     xSemaphoreGive(s_spk_lock);
-    s_mic = bsp_audio_codec_microphone_init();
-    s_mic_open = s_mic && esp_codec_dev_open(s_mic, &fs) == ESP_CODEC_DEV_OK;
-    if (s_mic_open) {
-        esp_codec_dev_set_in_gain(s_mic, MIC_GAIN_DB);
+    if (!s_mic_open) {
+        s_mic = bsp_audio_codec_microphone_init();
+        s_mic_open = s_mic && esp_codec_dev_open(s_mic, &fs) == ESP_CODEC_DEV_OK;
+        if (s_mic_open) {
+            esp_codec_dev_set_in_gain(s_mic, MIC_GAIN_DB);
+        }
     }
     if (!s_spk_open || !s_mic_open) {
         ESP_LOGE(TAG, "codec open failed: speaker %d, microphone %d", s_spk_open, s_mic_open);
@@ -422,6 +428,53 @@ bool open_encoder()
     return s_enc_buf && s_mic_buf && s_enc_in == static_cast<int>(FRAME_SAMPLES * sizeof(int16_t));
 }
 
+/* ---- wake word: only the microphone is open while the assistant is idle ---- */
+
+bool wake_mic_open()
+{
+    if (s_mic_open) {
+        return true;
+    }
+    s_mic = bsp_audio_codec_microphone_init();
+    esp_codec_dev_sample_info_t fs = {};
+    fs.sample_rate = RATE;
+    fs.channel = 1;
+    fs.bits_per_sample = 16;
+    s_mic_open = s_mic && esp_codec_dev_open(s_mic, &fs) == ESP_CODEC_DEV_OK;
+    if (s_mic_open) {
+        esp_codec_dev_set_in_gain(s_mic, MIC_GAIN_DB);
+    }
+    return s_mic_open;
+}
+
+void wake_mic_close()
+{
+    if (s_mic_open && !s_talking) {
+        esp_codec_dev_close(s_mic);
+        s_mic_open = false;
+    }
+}
+
+/* One chunk of the idle microphone; the wake word starts a conversation like a tap on the button */
+void wake_pump()
+{
+    if (!wake_mic_open()) {
+        ESP_LOGW(TAG, "wake word: microphone not available");
+        s_wake = false;
+        assistant_wake_close();
+        return;
+    }
+    const int n = assistant_wake_chunk();
+    if (esp_codec_dev_read(s_mic, s_wake_buf, n * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
+    if (assistant_wake_feed(s_wake_buf)) {
+        ESP_LOGI(TAG, "wake word heard");
+        on_button();
+    }
+}
+
 void session_task(void *)
 {
     bool ok = open_encoder();
@@ -458,12 +511,17 @@ void session_task(void *)
     }
     s_connected = false;
     s_state = ok ? ASSISTANT_CHAT_CONNECTING : ASSISTANT_CHAT_ERROR;
+    s_wake = ok && phone_pref_get("wake", 1) && assistant_wake_open();
+    if (s_wake) {
+        s_wake_buf = static_cast<int16_t *>(malloc(assistant_wake_chunk() * sizeof(int16_t)));
+        s_wake = s_wake_buf != nullptr;
+    }
 
     bool run = true;
     while (run) {
         int cmd;
         /* while talking the microphone read paces the loop */
-        while (xQueueReceive(s_cmds, &cmd, s_talking ? 0 : pdMS_TO_TICKS(100)) == pdPASS) {
+        while (xQueueReceive(s_cmds, &cmd, (s_talking || (s_wake && s_state == ASSISTANT_CHAT_IDLE)) ? 0 : pdMS_TO_TICKS(100)) == pdPASS) {
             switch (cmd) {
             case CMD_STOP:
                 run = false;
@@ -548,6 +606,12 @@ void session_task(void *)
                     listen();
                 }
             }
+        } else if (s_wake) {
+            if (s_state == ASSISTANT_CHAT_IDLE) {
+                wake_pump();
+            } else {
+                wake_mic_close();      /* not connected: leave the I2S clock alone */
+            }
         }
     }
 
@@ -566,12 +630,20 @@ void session_task(void *)
         s_enc = nullptr;
     }
     free(s_enc_buf);
+    wake_mic_close();
+    if (s_wake || s_wake_buf) {
+        assistant_wake_close();
+        free(s_wake_buf);
+        s_wake_buf = nullptr;
+        s_wake = false;
+    }
     free(s_mic_buf);
     s_enc_buf = nullptr;
     s_mic_buf = nullptr;
+    ESP_LOGD(TAG, "session task: %u bytes of stack left", (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     s_state = ASSISTANT_CHAT_OFF;
     xSemaphoreGive(s_done);
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 } // namespace
@@ -595,12 +667,16 @@ extern "C" void assistant_chat_start(bool has_mqtt, bool has_websocket)
     s_state = ASSISTANT_CHAT_CONNECTING;
     s_player_run = true;
     s_player_done = false;
-    if (xTaskCreate(play_task, "assistant_play", 16384, nullptr, 6, &s_player) != pdPASS) {
+    /* both stacks in PSRAM (48 KB of internal RAM otherwise); code runs from PSRAM too (XIP), and neither task
+     * writes the flash */
+    if (xTaskCreatePinnedToCoreWithCaps(play_task, "assistant_play", 16384, nullptr, 6, &s_player, tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM) != pdPASS) {
         s_player = nullptr;
         s_player_done = true;
     }
     /* Opus encoding needs a deep stack */
-    if (xTaskCreate(session_task, "assistant_chat", 32768, nullptr, 5, &s_session) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(session_task, "assistant_chat", 32768, nullptr, 5, &s_session, tskNO_AFFINITY,
+                                        MALLOC_CAP_SPIRAM) != pdPASS) {
         s_session = nullptr;
         s_state = ASSISTANT_CHAT_ERROR;
     }
