@@ -98,6 +98,8 @@ public:
     bool addIcon(const StatusBarIcon::Data &data, uint8_t area_index, int id);
     bool removeIcon(int id);
     bool setIconState(int id, int state) const;
+    /* local change of the phone repository: put an icon at `index` among the ones of its area (0 = first) */
+    bool moveIcon(int id, int index) const;
 
     // Battery
     bool setBatteryPercent(bool charge_flag, int percent) const;

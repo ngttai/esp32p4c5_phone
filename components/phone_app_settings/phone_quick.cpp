@@ -12,6 +12,7 @@
 #include "phone_lock.h"
 #include "phone_net.h"
 #include "phone_power.h"
+#include "phone_cell.h"
 
 using namespace esp_brookesia::systems;
 
@@ -21,10 +22,11 @@ const char *TAG = "quick";
 
 #define T(vi, en) phone_tr(vi, en)
 
-constexpr int PANEL_H = 376;
+constexpr int PANEL_H = 376 + 112 + 12;   // second row of tiles: 4G (and mobile data later)
 constexpr int TILE_Y = 84;
 constexpr int TILE_H = 112;
-constexpr int SLIDER_Y = TILE_Y + TILE_H + 16;
+constexpr int TILE2_Y = TILE_Y + TILE_H + 12;
+constexpr int SLIDER_Y = TILE2_Y + TILE_H + 16;
 constexpr int TOP_ZONE = 40;            // a pull starts this close to the top edge
 constexpr int HANDLE_ZONE = 70;         // a swipe up closes the panel from its last 70 px or below
 constexpr int ANIM_MS = 200;
@@ -47,6 +49,8 @@ lv_obj_t *s_wifi_sub;
 lv_obj_t *s_mute_tile;
 lv_obj_t *s_mute_icon;
 lv_obj_t *s_mute_sub;
+lv_obj_t *s_cell_tile;
+lv_obj_t *s_cell_sub;
 lv_obj_t *s_bri;
 lv_obj_t *s_vol;
 lv_timer_t *s_timer;
@@ -141,6 +145,17 @@ void refresh(lv_timer_t *)
     lv_label_set_text(s_wifi_sub, !wifi ? T("Tắt", "Off") : st.wifi_connected ? st.ssid
                       : st.wifi_connecting ? T("Đang kết nối…", "Connecting…") : T("Bật", "On"));
 
+    /* 4G: on/off, operator and signal */
+    const bool cell = phone_cell_is_enabled();
+    lv_obj_set_style_bg_color(s_cell_tile, lv_color_hex(cell ? COLOR_TILE_ON : COLOR_TILE), 0);
+    phone_cell_info_t ci;
+    phone_cell_get(&ci);
+    if (cell && ci.state == PHONE_CELL_REGISTERED && ci.oper[0]) {
+        lv_label_set_text_fmt(s_cell_sub, "%s%s", ci.oper, ci.roaming ? T(" · chuyển vùng", " · roaming") : "");
+    } else {
+        lv_label_set_text(s_cell_sub, phone_cell_state_text(cell ? ci.state : PHONE_CELL_OFF));
+    }
+
     /* Mute and the sliders follow the volume keys and Settings */
     const bool muted = phone_pref_get("mute", 0) != 0;
     lv_obj_set_style_bg_color(s_mute_tile, lv_color_hex(muted ? COLOR_TILE_ON : COLOR_TILE), 0);
@@ -166,11 +181,15 @@ void show_start()
 
 /* ---- touch on the panel ---- */
 
-void open_settings(bool wifi_page)
+enum class Open { MAIN, WIFI, CELL };
+
+void open_settings(Open page)
 {
     close_panel();
-    if (wifi_page) {
+    if (page == Open::WIFI) {
         phone_settings_open_wifi_next();
+    } else if (page == Open::CELL) {
+        phone_settings_open_cell_next();
     }
     base::Context::AppEventData ev = {
         .id = esp_brookesia::apps::PhoneSettings::requestInstance()->getId(),
@@ -183,7 +202,7 @@ void open_settings(bool wifi_page)
 void on_wifi(lv_event_t *e)
 {
     if (lv_event_get_code(e) == LV_EVENT_LONG_PRESSED) {
-        open_settings(true);
+        open_settings(Open::WIFI);
         return;
     }
     if (phone_net_is_enabled()) {
@@ -191,6 +210,16 @@ void on_wifi(lv_event_t *e)
     } else {
         phone_net_enable();
     }
+    refresh(nullptr);
+}
+
+void on_cell(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_LONG_PRESSED) {
+        open_settings(Open::CELL);
+        return;
+    }
+    phone_cell_set_enabled(!phone_cell_is_enabled());
     refresh(nullptr);
 }
 
@@ -293,12 +322,12 @@ void on_gesture(lv_event_t *e)
 /* ---- widgets ---- */
 
 lv_obj_t *make_tile(lv_obj_t *parent, int x, const char *icon, const char *title, lv_obj_t **icon_out, lv_obj_t **sub_out,
-                    lv_event_cb_t cb, bool long_press)
+                    lv_event_cb_t cb, bool long_press, int y = TILE_Y)
 {
     lv_obj_t *t = lv_button_create(parent);
     lv_obj_remove_style_all(t);
     lv_obj_set_size(t, 214, TILE_H);
-    lv_obj_set_pos(t, x, TILE_Y);
+    lv_obj_set_pos(t, x, y);
     lv_obj_set_style_radius(t, 20, 0);
     lv_obj_set_style_bg_opa(t, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(t, lv_color_hex(COLOR_TILE), 0);
@@ -425,7 +454,7 @@ void build()
     lv_obj_set_style_bg_color(gear, lv_color_hex(COLOR_TILE), 0);
     lv_obj_set_style_bg_color(gear, lv_color_hex(COLOR_FILL), LV_STATE_PRESSED);
     lv_obj_add_event_cb(gear, [](lv_event_t *) {
-        open_settings(false);
+        open_settings(Open::MAIN);
     }, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *gl = lv_label_create(gear);
     lv_obj_set_style_text_font(gl, &lv_font_montserrat_24, 0);
@@ -434,6 +463,7 @@ void build()
 
     s_wifi_tile = make_tile(s_panel, 20, LV_SYMBOL_WIFI, "Wi-Fi", nullptr, &s_wifi_sub, on_wifi, true);
     s_mute_tile = make_tile(s_panel, 246, LV_SYMBOL_MUTE, T("Im lặng", "Silent"), &s_mute_icon, &s_mute_sub, on_mute, false);
+    s_cell_tile = make_tile(s_panel, 20, "4G", T("Di động", "Mobile"), nullptr, &s_cell_sub, on_cell, true, TILE2_Y);
 
     s_bri = make_slider(s_panel, SLIDER_Y, nullptr, BRI_MIN, on_bri);
     draw_sun(s_bri);

@@ -45,6 +45,12 @@ public:
 
     bool updateByNewData(void);
 
+    /* local change of the phone repository: lets the status bar place an icon among the others */
+    lv_obj_t *getMainObject(void) const
+    {
+        return _main_obj.get();
+    }
+
 private:
     const Data &_data;
 

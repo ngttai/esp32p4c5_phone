@@ -17,6 +17,7 @@
 #include "phone_volume.h"
 #include "phone_monitor.h"
 #include "phone_quick.h"
+#include "phone_cell.h"
 #include "phone_boot_splash.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
@@ -27,6 +28,10 @@
 #include "esp_lib_utils.h"
 
 using namespace esp_brookesia;
+
+constexpr int CELL_ICON_ID = 1000;      // 4G signal on the status bar
+extern "C" const lv_image_dsc_t phone_cell_nosim, phone_cell_bars0, phone_cell_bars1, phone_cell_bars2,
+       phone_cell_bars3, phone_cell_bars4;
 using namespace esp_brookesia::gui;
 using namespace esp_brookesia::systems::phone;
 
@@ -120,6 +125,8 @@ extern "C" void app_main(void)
         phone_net_start();
         /* Battery polling and power key (AXP2101) */
         phone_power_start();
+        /* 4G modem (ML307C, from the battery) when 4G was left on */
+        phone_cell_start();
         /* microSD card in the background (never formatted) */
         phone_storage_start();
         /* Dim / lock screen / screen off on inactivity and on the power key */
@@ -130,6 +137,28 @@ extern "C" void app_main(void)
         phone_monitor_init();
         /* Quick settings: pull down from the top edge */
         phone_quick_start(phone);
+        /* 4G signal on the status bar, before the Wi-Fi icon; hidden while 4G is off */
+        {
+            static const systems::phone::StatusBarIcon::Data cell_icon = {
+                .size = gui::StyleSize::SQUARE(24),
+                .icon = {
+                    .image_num = 6,
+                    .images = {
+                        gui::StyleImage::IMAGE_RECOLOR_WHITE(&phone_cell_nosim),
+                        gui::StyleImage::IMAGE_RECOLOR_WHITE(&phone_cell_bars0),
+                        gui::StyleImage::IMAGE_RECOLOR_WHITE(&phone_cell_bars1),
+                        gui::StyleImage::IMAGE_RECOLOR_WHITE(&phone_cell_bars2),
+                        gui::StyleImage::IMAGE_RECOLOR_WHITE(&phone_cell_bars3),
+                        gui::StyleImage::IMAGE_RECOLOR_WHITE(&phone_cell_bars4),
+                    },
+                },
+            };
+            auto *bar = phone->getDisplay().getStatusBar();
+            if (bar->addIcon(cell_icon, 1, CELL_ICON_ID)) {
+                bar->moveIcon(CELL_ICON_ID, 0);
+                bar->setIconState(CELL_ICON_ID, -1);
+            }
+        }
         /* Everything is up: the splash fades out after its animation */
         phone_boot_splash_ready();
 
@@ -159,6 +188,31 @@ extern "C" void app_main(void)
             if (wifi != s_wifi) {
                 s_wifi = wifi;
                 phone->getDisplay().getStatusBar()->setWifiIconState(wifi);
+            }
+
+            /* 4G: hidden when off, a cross without SIM or answer, dim bars without service, then 1 to 4 bars */
+            static int s_cell = -2;
+            phone_cell_info_t ci;
+            phone_cell_get(&ci);
+            int cell = -1;
+            if (phone_cell_is_enabled()) {
+                switch (ci.state) {
+                case PHONE_CELL_NO_SIM:
+                case PHONE_CELL_SIM_LOCKED:
+                case PHONE_CELL_NO_ANSWER:
+                    cell = 0;
+                    break;
+                case PHONE_CELL_REGISTERED:
+                    cell = ci.bars > 0 ? 1 + ci.bars : 1;
+                    break;
+                default:
+                    cell = 1;
+                    break;
+                }
+            }
+            if (cell != s_cell) {
+                s_cell = cell;
+                phone->getDisplay().getStatusBar()->setIconState(CELL_ICON_ID, cell);
             }
 
             static int s_bat = -2;

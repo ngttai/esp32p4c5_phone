@@ -139,6 +139,18 @@ bool StatusBar::removeIcon(int id)
     return true;
 }
 
+bool StatusBar::moveIcon(int id, int index) const
+{
+    auto ret = _id_icon_map.find(id);
+    ESP_UTILS_CHECK_FALSE_RETURN(ret != _id_icon_map.end(), false, "Icon not found");
+    ESP_UTILS_CHECK_NULL_RETURN(ret->second, false, "Found invalid icon");
+    lv_obj_t *obj = ret->second->getMainObject();
+    ESP_UTILS_CHECK_NULL_RETURN(obj, false, "Icon not begun");
+    lv_obj_move_to_index(obj, index);
+
+    return true;
+}
+
 bool StatusBar::setIconState(int id, int state) const
 {
     shared_ptr<StatusBarIcon> icon = nullptr;

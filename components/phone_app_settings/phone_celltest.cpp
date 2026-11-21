@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "bsp/esp-bsp.h"
+#include "phone_cell.h"
 
 #define TAG "CELL"
 
@@ -332,8 +333,8 @@ void test_task(void *)
 
 extern "C" bool phone_celltest_start(void)
 {
-    if (s_running.exchange(true)) {
-        return false;
+    if (phone_cell_busy() || s_running.exchange(true)) {
+        return false;           /* the 4G service owns the modem while 4G is on */
     }
     if (!s_report) {
         s_report = static_cast<char *>(heap_caps_malloc(REPORT_SIZE, MALLOC_CAP_SPIRAM));

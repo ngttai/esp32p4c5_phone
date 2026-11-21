@@ -35,6 +35,7 @@
 #include "phone_membench.h"
 #include "phone_sdbench.h"
 #include "phone_celltest.h"
+#include "phone_cell.h"
 #include "esp_flash.h"
 #include "esp_psram.h"
 #include "phone_lock.h"
@@ -63,6 +64,7 @@ enum Page {
     PAGE_SPEED,
     PAGE_MEM,
     PAGE_CELL,
+    PAGE_CELLULAR,
     PAGE_COUNT,
 };
 
@@ -103,6 +105,7 @@ bool s_muted;
 lv_obj_t *s_wifi_sw;
 bool s_wifi_on = true;
 bool s_open_wifi;          // show the Wi-Fi page on the next run or resume
+bool s_open_cell;          // show the Mobile network page on the next run or resume
 lv_obj_t *s_kb;
 
 bool s_wifi_inited;
@@ -1226,6 +1229,96 @@ void build_speed_page(lv_obj_t *root)
     speed_refresh();
 }
 
+/* Mobile network page (Settings > Mobile network): 4G on/off and what the modem reports (stage 1 of
+ * PLAN_4G.md: no data over 4G yet) */
+enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_APN, CR_IP, CR_ICCID, CR_IMSI, CR_IMEI, CR_MODEL, CR_COUNT };
+lv_obj_t *s_cellular_sw;
+lv_obj_t *s_cellular_vals[CR_COUNT];
+
+void set_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (strcmp(lv_label_get_text(label), text) != 0) {
+        lv_label_set_text(label, text);
+    }
+}
+
+void cellular_refresh()
+{
+    if (!s_cellular_sw) {
+        return;
+    }
+    const bool on = phone_cell_is_enabled();
+    if (lv_obj_has_state(s_cellular_sw, LV_STATE_CHECKED) != on) {
+        if (on) {
+            lv_obj_add_state(s_cellular_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_remove_state(s_cellular_sw, LV_STATE_CHECKED);
+        }
+    }
+    phone_cell_info_t ci;
+    phone_cell_get(&ci);
+    char buf[96];
+    set_text_if_changed(s_cellular_vals[CR_STATE], phone_cell_state_text(on ? ci.state : PHONE_CELL_OFF));
+    if (ci.oper[0]) {
+        snprintf(buf, sizeof(buf), "%s%s", ci.oper, ci.roaming ? T(" (chuyển vùng)", " (roaming)") : "");
+    } else {
+        strlcpy(buf, "--", sizeof(buf));
+    }
+    set_text_if_changed(s_cellular_vals[CR_OPER], buf);
+    if (ci.rssi_dbm) {
+        snprintf(buf, sizeof(buf), "%d dBm  ·  %d/4", ci.rssi_dbm, ci.bars);
+    } else {
+        strlcpy(buf, "--", sizeof(buf));
+    }
+    set_text_if_changed(s_cellular_vals[CR_SIGNAL], buf);
+    set_text_if_changed(s_cellular_vals[CR_NET], ci.act[0] ? ci.act : "--");
+    set_text_if_changed(s_cellular_vals[CR_APN], ci.apn[0] ? ci.apn : "--");
+    set_text_if_changed(s_cellular_vals[CR_IP], ci.ip[0] ? ci.ip : "--");
+    set_text_if_changed(s_cellular_vals[CR_ICCID], ci.iccid[0] ? ci.iccid : "--");
+    set_text_if_changed(s_cellular_vals[CR_IMSI], ci.imsi[0] ? ci.imsi : "--");
+    set_text_if_changed(s_cellular_vals[CR_IMEI], ci.imei[0] ? ci.imei : "--");
+    if (ci.model[0]) {
+        snprintf(buf, sizeof(buf), "%s %s", ci.model, ci.firmware);
+    } else {
+        strlcpy(buf, "--", sizeof(buf));
+    }
+    set_text_if_changed(s_cellular_vals[CR_MODEL], buf);
+}
+
+void build_cellular_page(lv_obj_t *root)
+{
+    lv_obj_t *p = make_page(root, T("Mạng di động", "Mobile network"), PAGE_CELLULAR);
+    lv_obj_t *card = make_card(p);
+    s_cellular_sw = switch_row(card, "4G", phone_cell_is_enabled(), [](lv_event_t *e) {
+        phone_cell_set_enabled(lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED));
+        cellular_refresh();
+    });
+    group_end(card);
+    static const struct {
+        CellRow row;
+        const char *vi, *en;
+    } rows[] = {
+        {CR_STATE, "Trạng thái", "Status"}, {CR_OPER, "Nhà mạng", "Operator"}, {CR_SIGNAL, "Sóng", "Signal"},
+        {CR_NET, "Mạng", "Network"}, {CR_APN, "APN", "APN"}, {CR_IP, "IP", "IP"}, {CR_ICCID, "ICCID", "ICCID"},
+        {CR_IMSI, "IMSI", "IMSI"}, {CR_IMEI, "IMEI", "IMEI"}, {CR_MODEL, "Module", "Module"},
+    };
+    const char *groups[] = {T("Trạng thái", "Status"), T("Dữ liệu (chưa dùng cho Internet)", "Data (not used for Internet yet)"),
+                            "SIM", T("Module", "Module")};
+    const int first[] = {CR_STATE, CR_APN, CR_ICCID, CR_IMEI, CR_COUNT};
+    for (int gi = 0; gi < 4; gi++) {
+        lv_obj_t *g = make_group(p, groups[gi]);
+        for (int r = first[gi]; r < first[gi + 1]; r++) {
+            lv_obj_t *v = kv_row(g, T(rows[r].vi, rows[r].en));
+            lv_obj_set_style_max_width(v, 280, 0);
+            lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+            lv_label_set_text(v, "--");
+            s_cellular_vals[rows[r].row] = v;
+        }
+        group_end(g);
+    }
+    cellular_refresh();
+}
+
 /* 4G page (Settings > Debug): stage 0 of PLAN_4G.md, the probe of phone_celltest */
 lv_obj_t *s_cell_text;
 size_t s_cell_shown = SIZE_MAX;
@@ -1258,7 +1351,12 @@ void build_cell_page(lv_obj_t *root)
     lv_obj_t *p = make_page(root, "4G", PAGE_CELL);
     lv_obj_t *g = make_group(p, T("Đo", "Test"));
     grouped_row(g, T(LV_SYMBOL_PLAY "  Đo", LV_SYMBOL_PLAY "  Run"), [](lv_event_t *) {
-        phone_celltest_start();
+        if (!phone_celltest_start() && phone_cell_busy()) {
+            lv_label_set_text(s_cell_text, T("4G đang bật: tắt 4G (Cài đặt > Mạng di động) rồi đo lại.",
+                                             "4G is on: turn it off (Settings > Mobile network), then run again."));
+            s_cell_shown = SIZE_MAX - 1;
+            return;
+        }
         cell_refresh();
     }, nullptr);
     group_end(g);
@@ -1379,6 +1477,8 @@ void on_timer(lv_timer_t *t)
         sd_refresh();
     } else if (s_cur_page == PAGE_CELL) {
         cell_refresh();
+    } else if (s_cur_page == PAGE_CELLULAR) {
+        cellular_refresh();
     } else if (s_cur_page == PAGE_ABOUT) {
         static int tick;
         if ((++tick % 4) == 0) {
@@ -1532,6 +1632,8 @@ void build_ui()
     s_mem_text = nullptr;
     s_sd_text = nullptr;
     s_cell_text = nullptr;
+    s_cellular_sw = nullptr;
+    memset(s_cellular_vals, 0, sizeof(s_cellular_vals));
     s_cell_shown = SIZE_MAX;
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
@@ -1551,6 +1653,7 @@ void build_ui()
     lv_obj_t *main_page = make_page(root, T("Cài đặt", "Settings"), PAGE_MAIN);
     lv_obj_t *g = make_group(main_page, T("Kết nối", "Connectivity"));
     group_row(g, LV_SYMBOL_WIFI, 0x2F80ED, "Wi-Fi", nullptr, PAGE_WIFI);
+    group_row(g, "4G", 0x27AE60, T("Mạng di động", "Mobile network"), nullptr, PAGE_CELLULAR);
     group_end(g);
 
     g = make_group(main_page, T("Thiết bị", "Device"));
@@ -1730,6 +1833,7 @@ void build_ui()
 
     build_speed_page(root);
     build_cell_page(root);
+    build_cellular_page(root);
     build_mem_page(root);
 
     lv_obj_t *about = make_page(root, T("Giới thiệu", "About"), PAGE_ABOUT);
@@ -1819,6 +1923,10 @@ bool PhoneSettings::run()
         s_open_wifi = false;
         show_page(PAGE_WIFI);
     }
+    if (s_open_cell) {
+        s_open_cell = false;
+        show_page(PAGE_CELLULAR);
+    }
     return true;
 }
 
@@ -1827,6 +1935,10 @@ bool PhoneSettings::resume()
     if (s_open_wifi) {
         s_open_wifi = false;
         show_page(PAGE_WIFI);
+    }
+    if (s_open_cell) {
+        s_open_cell = false;
+        show_page(PAGE_CELLULAR);
     }
     return true;
 }
@@ -1848,6 +1960,11 @@ bool PhoneSettings::back()
 void phone_settings_open_wifi_next(void)
 {
     s_open_wifi = true;
+}
+
+void phone_settings_open_cell_next(void)
+{
+    s_open_cell = true;
 }
 
 namespace esp_brookesia::apps {

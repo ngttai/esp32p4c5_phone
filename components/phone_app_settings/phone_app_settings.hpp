@@ -4,6 +4,8 @@
 
 /** The next start or resume of Settings shows the Wi-Fi page (quick settings, long press on Wi-Fi). */
 void phone_settings_open_wifi_next(void);
+/** The next start or resume of Settings shows the Mobile network page (long press on the 4G tile). */
+void phone_settings_open_cell_next(void);
 
 namespace esp_brookesia::apps {
 
