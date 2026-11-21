@@ -15,6 +15,10 @@ constexpr int RATE = 16000;
 constexpr int TONE_HZ = 1000;
 constexpr int TONE_MS = 150;
 constexpr int SAMPLES = RATE * TONE_MS / 1000;
+/* Silence around the tone: the amplifier needs a moment after the codec opens, and closing the codec
+ * stops the I2S DMA with what is still queued (6 x 240 frames, ~90 ms at 16 kHz) */
+constexpr int LEAD_MS = 40;
+constexpr int TAIL_MS = 120;
 
 std::atomic<int> s_volume{60};
 std::atomic<bool> s_busy{false};
@@ -39,7 +43,11 @@ void beep_task(void *)
             float gain = i < edge ? (float)i / edge : (i > SAMPLES - edge ? (float)(SAMPLES - i) / edge : 1.0f);
             tone[i] = (int16_t)(12000.0f * gain * sinf(2.0f * (float)M_PI * TONE_HZ * i / RATE));
         }
-        esp_codec_dev_write(s_spk, tone, sizeof(tone));
+        static int16_t silence[RATE * TAIL_MS / 1000];
+        esp_codec_dev_write(s_spk, silence, RATE * LEAD_MS / 1000 * sizeof(int16_t));
+        const int ret = esp_codec_dev_write(s_spk, tone, sizeof(tone));
+        esp_codec_dev_write(s_spk, silence, sizeof(silence));
+        ESP_LOGI(TAG, "beep at %d%%: write %d", s_volume.load(), ret);
         esp_codec_dev_close(s_spk);
     } else {
         ESP_LOGW(TAG, "Speaker not available");
@@ -74,7 +82,7 @@ void *take(phone_audio_yield_cb_t yield_cb)
             ESP_LOGI(TAG, "speaker busy: asking its holder to stop");
             yield();
         }
-        const int tries = yield ? 150 : 15;
+        const int tries = yield ? 150 : 25;
         bool got = false;
         for (int i = 0; i < tries && !got; i++) {
             vTaskDelay(pdMS_TO_TICKS(20));
