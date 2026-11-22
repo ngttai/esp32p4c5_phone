@@ -30,8 +30,9 @@
 using namespace esp_brookesia;
 
 constexpr int CELL_ICON_ID = 1000;      // 4G signal on the status bar
+constexpr int CELL_DATA_ICON_ID = 1001; // "4G" left of it while mobile data carries the traffic
 extern "C" const lv_image_dsc_t phone_cell_nosim, phone_cell_bars0, phone_cell_bars1, phone_cell_bars2,
-       phone_cell_bars3, phone_cell_bars4;
+       phone_cell_bars3, phone_cell_bars4, phone_cell_4g;
 using namespace esp_brookesia::gui;
 using namespace esp_brookesia::systems::phone;
 
@@ -153,10 +154,23 @@ extern "C" void app_main(void)
                     },
                 },
             };
+            static const systems::phone::StatusBarIcon::Data data_icon = {
+                .size = gui::StyleSize::RECT(phone_cell_4g.header.w, 24),
+                .icon = {
+                    .image_num = 1,
+                    .images = {
+                        gui::StyleImage::IMAGE_RECOLOR_WHITE(&phone_cell_4g),
+                    },
+                },
+            };
             auto *bar = phone->getDisplay().getStatusBar();
             if (bar->addIcon(cell_icon, 1, CELL_ICON_ID)) {
                 bar->moveIcon(CELL_ICON_ID, 0);
                 bar->setIconState(CELL_ICON_ID, -1);
+            }
+            if (bar->addIcon(data_icon, 1, CELL_DATA_ICON_ID)) {
+                bar->moveIcon(CELL_DATA_ICON_ID, 0);    /* "4G" | bars | Wi-Fi */
+                bar->setIconState(CELL_DATA_ICON_ID, -1);
             }
         }
         /* Everything is up: the splash fades out after its animation */
@@ -213,6 +227,13 @@ extern "C" void app_main(void)
             if (cell != s_cell) {
                 s_cell = cell;
                 phone->getDisplay().getStatusBar()->setIconState(CELL_ICON_ID, cell);
+            }
+            /* "4G" only while PPP is up (Wi-Fi gone): not for data off, standby on Wi-Fi or a failed dial */
+            static int s_cell_data = -2;
+            const int cell_data = (cell >= 1 && ci.data == PHONE_CELL_DATA_UP) ? 0 : -1;
+            if (cell_data != s_cell_data) {
+                s_cell_data = cell_data;
+                phone->getDisplay().getStatusBar()->setIconState(CELL_DATA_ICON_ID, cell_data);
             }
 
             static int s_bat = -2;
