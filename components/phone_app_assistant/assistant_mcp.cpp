@@ -8,6 +8,7 @@
 #include "esp_mcp_tool.h"
 #include "phone_audio.h"
 #include "phone_locale.h"
+#include "phone_cell.h"
 #include "phone_net.h"
 #include "phone_power.h"
 
@@ -35,15 +36,22 @@ esp_mcp_value_t get_device_status(const esp_mcp_property_list_t *)
     }
     phone_net_status_t net = {};
     phone_net_get_status(&net);
+    phone_cell_info_t cell = {};
+    phone_cell_get(&cell);
+    /* Wi-Fi first (it has the route), else mobile data over 4G */
+    const bool on_cell = !net.wifi_connected && cell.data == PHONE_CELL_DATA_UP;
+    const bool online = net.wifi_connected || on_cell;
+    const char *net_type = on_cell ? "cellular" : "wifi";
+    const int dbm = net.wifi_connected ? net.rssi : (on_cell ? cell.rssi_dbm : 0);
 
     int n = snprintf(buf, sizeof(buf),
                      "{\"audio_speaker\":{\"volume\":%d},\"screen\":{\"brightness\":%d},"
                      "\"battery\":{\"percent\":%d,\"state\":\"%s\",\"usb_power\":%s},"
-                     "\"network\":{\"type\":\"wifi\",\"connected\":%s,\"signal_dbm\":%d},"
+                     "\"network\":{\"type\":\"%s\",\"connected\":%s,\"signal_dbm\":%d},"
                      "\"led\":{\"red\":%d,\"green\":%d,\"blue\":%d}}",
                      phone_audio_get_volume(), phone_pref_get("bri", DEFAULT_BRIGHTNESS),
                      have_bat ? bat.percent : -1, state, (have_bat && bat.vbus_present) ? "true" : "false",
-                     net.wifi_connected ? "true" : "false", net.wifi_connected ? net.rssi : 0,
+                     net_type, online ? "true" : "false", dbm,
                      s_led[0], s_led[1], s_led[2]);
     if (n < 0 || n >= static_cast<int>(sizeof(buf))) {
         return esp_mcp_value_create_string("{}");
@@ -140,7 +148,7 @@ extern "C" bool assistant_mcp_register(esp_mcp_t *mcp)
     int added = 0;
     added += add_tool(mcp, "self.get_device_status",
                       "Real-time device status: speaker volume, screen brightness, battery level and charging "
-                      "state, Wi-Fi connection, RGB LED color. Use it before changing volume or brightness, or "
+                      "state, network (Wi-Fi or 4G), RGB LED color. Use it before changing volume or brightness, or "
                       "to answer questions about the battery or the network.",
                       get_device_status);
     added += add_tool(mcp, "self.audio_speaker.set_volume", "Set the speaker volume (0 is silent, 100 is the loudest).",

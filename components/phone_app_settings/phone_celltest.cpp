@@ -263,17 +263,101 @@ void dial_test()
     add("> ATH  -> %s", flat);
 }
 
+/* Bytes as hex, for the CMUX frames */
+void add_hex(const char *what, const uint8_t *b, int n)
+{
+    char line[300];
+    int o = snprintf(line, sizeof(line), "%s (%d bytes):", what, n);
+    for (int i = 0; i < n && o + 4 < static_cast<int>(sizeof(line)); i++) {
+        o += snprintf(line + o, sizeof(line) - o, " %02X", b[i]);
+    }
+    add("%s", line);
+}
+
+/* One way into CMUX: the AT command, then SABM on DLCI 0 (twice, 1 s apart), and what comes back.
+ * Expected answer: UA on DLCI 0 = F9 03 73 01 D7 F9 */
+bool cmux_try(const char *cmd)
+{
+    char buf[256];
+    char at_cmd[64];
+    snprintf(at_cmd, sizeof(at_cmd), "%s\r\n", cmd);
+    const bool ok = raw(at_cmd, "OK", "ERROR", 2000, buf, sizeof(buf));
+    char flat[200];
+    flatten(buf, flat, sizeof(flat));
+    add("> %s  -> %s", cmd, flat);
+    if (!ok) {
+        return false;
+    }
+    static const uint8_t sabm0[] = {0xF9, 0x03, 0x3F, 0x01, 0x1C, 0xF9};
+    bool ua = false;
+    for (int attempt = 0; attempt < 2 && !ua; attempt++) {
+        vTaskDelay(pdMS_TO_TICKS(attempt ? 1000 : 100));
+        uart_flush_input(PORT);
+        uart_write_bytes(PORT, sabm0, sizeof(sabm0));
+        uint8_t in[128];
+        int n = 0;
+        const int64_t end = esp_timer_get_time() + 1500000;
+        while (esp_timer_get_time() < end && n < static_cast<int>(sizeof(in))) {
+            const int r = uart_read_bytes(PORT, in + n, sizeof(in) - n, pdMS_TO_TICKS(50));
+            n += r > 0 ? r : 0;
+        }
+        char what[48];
+        snprintf(what, sizeof(what), "SABM DLCI0 #%d answer", attempt + 1);
+        add_hex(what, in, n);
+        for (int i = 0; i + 2 < n; i++) {
+            if (in[i] == 0xF9 && in[i + 1] == 0x03 && (in[i + 2] & 0xEF) == 0x63) {
+                ua = true;
+            }
+        }
+    }
+    add("%s: %s", cmd, ua ? "UA received, CMUX works" : "no UA");
+    return ua;
+}
+
+void cmux_test()
+{
+    add("--- CMUX (raw frames) ---");
+    static const char *const ways[] = {"AT+CMUX=0", "AT+CMUX=0,0,5,127"};
+    for (const char *way : ways) {
+        /* a fresh module for each way: once in CMUX it no longer takes AT */
+        bsp_modem_deinit();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (bsp_modem_init() != ESP_OK) {
+            add("no answer after power cycle");
+            return;
+        }
+        if (cmux_try(way)) {
+            return;
+        }
+    }
+}
+
 void test_task(void *)
 {
     add("=== 4G probe ===");
     const int64_t t0 = esp_timer_get_time();
     if (bsp_modem_init() != ESP_OK) {
-        add("No answer to AT within 15 s. The module runs from the battery: is it in?");
-        s_running = false;
-        vTaskDelete(nullptr);
-        return;
+        /* the BSP waits at 115200 only: after 4G the module may still be at 921600 (AT+IPR is kept) */
+        int found = 0;
+        if (uart_is_driver_installed(PORT) && bsp_power_set(BSP_POWER_MODEM, true) == ESP_OK) {
+            const int64_t end = esp_timer_get_time() + 12 * 1000 * 1000LL;
+            while (!found && esp_timer_get_time() < end) {
+                found = find_baud();
+            }
+        }
+        if (!found) {
+            add("No answer to AT within 15 s at any rate. The module runs from the battery: is it in?");
+            bsp_modem_deinit();         /* frees the UART: the 4G service needs it */
+            s_running = false;
+            vTaskDelete(nullptr);
+            return;
+        }
+        add("no answer at 115200, answers at %d after %lld ms", found, (esp_timer_get_time() - t0) / 1000);
+        char resp[64];
+        bsp_modem_at("ATE0", resp, sizeof(resp), 500);
+    } else {
+        add("answers AT after %lld ms", (esp_timer_get_time() - t0) / 1000);
     }
-    add("answers AT after %lld ms", (esp_timer_get_time() - t0) / 1000);
     /* it may keep a rate from a previous probe */
     if (at_score(3) < 2) {
         add("no answer at 115200, found at %d", find_baud());
@@ -322,6 +406,8 @@ void test_task(void *)
     } else {
         add("no SIM ready: network steps skipped");
     }
+
+    cmux_test();
 
     bsp_modem_deinit();
     add("=== done in %lld s, modem off ===", (esp_timer_get_time() - t0) / 1000000);

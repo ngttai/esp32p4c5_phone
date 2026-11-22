@@ -356,11 +356,9 @@ void start_fetch()
     if (s_fetch == F_BUSY) {
         return;
     }
-    phone_net_status_t st = {};
-    phone_net_get_status(&st);
-    if (!st.wifi_connected) {
+    if (!phone_net_online()) {
         if (!s_have_wx) {
-            show_message(T("Chưa kết nối Wi-Fi", "Wi-Fi is not connected"), true);
+            show_message(T("Chưa có Internet (Wi-Fi hoặc 4G)", "No Internet (Wi-Fi or 4G)"), true);
         }
         lv_label_set_text(s_updated, T("Không có mạng", "Offline"));
         return;

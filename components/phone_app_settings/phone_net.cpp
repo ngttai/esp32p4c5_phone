@@ -1,4 +1,5 @@
 #include "phone_net.h"
+#include "phone_cell.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -222,6 +223,8 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
                 esp_timer_start_once(s_retry, was_up ? RETRY_DROP_US : RETRY_US);
             }
         }
+    } else if (base == IP_EVENT && id == IP_EVENT_PPP_GOT_IP) {
+        sntp_start_once();          /* booted on 4G with no Wi-Fi: the clock still needs SNTP (TLS checks dates) */
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto *ev = static_cast<ip_event_got_ip_t *>(data);
         wifi_ap_record_t ap = {};
@@ -278,6 +281,7 @@ bool wifi_start()
     }
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_event, nullptr);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_event, nullptr);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, on_event, nullptr);
     esp_hosted_coprocessor_fwver_t ver = {};
     if (esp_hosted_get_coprocessor_fwversion(&ver) == ESP_OK) {
         snprintf(s_c5_ver, sizeof(s_c5_ver), "%u.%u.%u", (unsigned)ver.major1, (unsigned)ver.minor1, (unsigned)ver.patch1);
@@ -344,6 +348,18 @@ extern "C" void phone_net_get_status(phone_net_status_t *out)
     }
     Lock l;
     *out = s_st;
+}
+
+extern "C" bool phone_net_online(void)
+{
+    phone_net_status_t st = {};
+    phone_net_get_status(&st);
+    if (st.wifi_connected) {
+        return true;
+    }
+    phone_cell_info_t cell = {};
+    phone_cell_get(&cell);
+    return cell.data == PHONE_CELL_DATA_UP;
 }
 
 extern "C" bool phone_net_ready(void)

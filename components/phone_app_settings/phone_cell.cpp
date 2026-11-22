@@ -250,6 +250,11 @@ bool power_on()
         esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_GOT_IP, on_ip_event, nullptr);
         esp_event_handler_register(IP_EVENT, IP_EVENT_PPP_LOST_IP, on_ip_event, nullptr);
     }
+    if (uart_is_driver_installed(PORT)) {
+        /* left by a Debug > 4G probe that stopped early: esp_modem installs its own driver */
+        ESP_LOGW(TAG, "UART %d was still installed: freed", PORT);
+        uart_driver_delete(PORT);
+    }
     esp_modem_dte_config_t dte = ESP_MODEM_DTE_DEFAULT_CONFIG();
     dte.dte_buffer_size = 2048;
     dte.task_stack_size = 4096;
@@ -318,7 +323,9 @@ void power_off()
     if (s_dce) {
         char resp[64];
         if (s_baud != BAUD_BOOT) {
-            at("AT+IPR=115200", resp, sizeof(resp));  /* the BSP probe and the Debug page talk at 115200 */
+            /* the BSP probe and the Debug page talk at 115200 */
+            const bool ok = at("AT+IPR=115200", resp, sizeof(resp));
+            ESP_LOGI(TAG, "back to 115200: %s", ok ? "ok" : "no answer");
         }
         esp_modem_destroy(s_dce);
         s_dce = nullptr;

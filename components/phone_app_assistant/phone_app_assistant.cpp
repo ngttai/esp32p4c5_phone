@@ -101,9 +101,7 @@ void info_task(void *arg)
     int failures = 0;
     bool have_code = false;
     while (current()) {
-        phone_net_status_t net = {};
-        phone_net_get_status(&net);
-        if (!net.wifi_connected) {
+        if (!phone_net_online()) {
             if (!have_code) {
                 s_state = ST_NO_WIFI;       /* with a code on the screen, keep it: the link usually comes back */
             }
@@ -186,9 +184,9 @@ void show_setup_state(int state)
     lv_obj_set_flag(s_retry, LV_OBJ_FLAG_HIDDEN, state != ST_ERROR);
     switch (state) {
     case ST_NO_WIFI:
-        set_status(T("Chưa kết nối Wi-Fi", "Wi-Fi is not connected"), COLOR_SUB);
-        lv_label_set_text(s_hint, T("Trợ lý cần Internet. Hãy kết nối Wi-Fi trong Cài đặt.",
-                                    "The assistant needs the Internet. Connect to Wi-Fi in Settings."));
+        set_status(T("Chưa có Internet", "No Internet"), COLOR_SUB);
+        lv_label_set_text(s_hint, T("Trợ lý cần Internet. Hãy kết nối Wi-Fi hoặc bật dữ liệu di động trong Cài đặt.",
+                                    "The assistant needs the Internet. Connect to Wi-Fi or turn on mobile data in Settings."));
         break;
     case ST_FETCHING:
         set_status(T("Đang kết nối máy chủ...", "Contacting the server..."), COLOR_SUB);
@@ -203,8 +201,8 @@ void show_setup_state(int state)
         break;
     case ST_ERROR:
         set_status(T("Không kết nối được máy chủ", "Could not reach the server"), COLOR_ERROR);
-        lv_label_set_text(s_hint, T("Kiểm tra Wi-Fi có Internet không rồi thử lại.",
-                                    "Check that the Wi-Fi has Internet access, then try again."));
+        lv_label_set_text(s_hint, T("Kiểm tra kết nối Internet (Wi-Fi hoặc 4G) rồi thử lại.",
+                                    "Check the Internet connection (Wi-Fi or 4G), then try again."));
         break;
     default:
         set_status("", COLOR_SUB);
