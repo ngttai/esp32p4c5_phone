@@ -54,7 +54,7 @@ constexpr size_t PCM_BYTES = 8192;          // one decoded packet (up to 120 ms 
 
 enum Cmd {
     CMD_BUTTON, CMD_CONNECTED, CMD_DISCONNECTED, CMD_CHANNEL_OPENED, CMD_CHANNEL_CLOSED, CMD_GOODBYE,
-    CMD_TTS_START, CMD_TTS_STOP, CMD_STOP,
+    CMD_TTS_START, CMD_TTS_STOP, CMD_OPTIONS, CMD_STOP,
 };
 
 struct Packet {
@@ -86,6 +86,8 @@ bool s_answer_done;                         // the server finished the answer; l
 bool s_goodbye;                             // the server ended the conversation; stop once the answer has been played
 bool s_connected;                           // link to the server, as last reported
 bool s_wake;                                // the wake word model is loaded; the idle microphone listens for it
+bool s_options_changed;                     // a switch changed: models opened or closed when no conversation is open
+bool s_wake_want = true, s_barge_want = true;   // the switches, as they are now (a switch turned off acts at once)
 int16_t *s_wake_buf;
 bool s_afe_on;                              // saying the wake word over the answer interrupts it (esp-sr front-end)
 int16_t *s_ref_buf;                         // what the speaker played during the last microphone frame
@@ -484,8 +486,10 @@ void pump_microphone()
         return;
     }
     ref_take(s_ref_buf, FRAME_SAMPLES);
-    if (s_afe_on && s_state == ASSISTANT_CHAT_SPEAKING) {
-        barge_in_feed();
+    if (s_state == ASSISTANT_CHAT_SPEAKING) {
+        if (s_afe_on && s_barge_want) {
+            barge_in_feed();
+        }
         return;
     }
     if (s_state != ASSISTANT_CHAT_LISTENING || !s_enc) {
@@ -581,6 +585,59 @@ void wake_pump()
     }
 }
 
+/* ---- options (switches of the conversation page, NVS "wake" and "barge") ---- */
+
+void options_open()
+{
+    const bool want_wake = s_wake_want = phone_pref_get("wake", 1);
+    const bool want_barge = s_barge_want = phone_pref_get("barge", 1);
+    /* both use the WakeNet model of the "model" partition */
+    const bool models = (want_wake || want_barge) && assistant_wake_open();
+    s_wake = models && want_wake;
+    if (s_wake) {
+        s_wake_buf = static_cast<int16_t *>(malloc(assistant_wake_chunk() * sizeof(int16_t)));
+        s_wake = s_wake_buf != nullptr;
+    }
+    s_ref_delay = phone_pref_get("aecd", REF_DELAY_DEFAULT);
+    if (models && want_barge) {
+        /* the I2S channels first (stage 3b: created after the front-end, they found no DMA memory) */
+        int16_t *ring = static_cast<int16_t *>(heap_caps_calloc(REF_RING, sizeof(int16_t), MALLOC_CAP_SPIRAM));
+        taskENTER_CRITICAL(&s_ref_mux);
+        s_ref_ring = ring;
+        taskEXIT_CRITICAL(&s_ref_mux);
+        s_afe_on = ring && open_codecs();
+        close_codecs();
+        s_afe_on = s_afe_on && assistant_afe_open();
+        if (s_afe_on) {
+            const int chunk = assistant_afe_chunk();
+            s_acc_mic = static_cast<int16_t *>(heap_caps_malloc(chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+            s_acc_ref = static_cast<int16_t *>(heap_caps_malloc(chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+            s_afe_on = s_acc_mic && s_acc_ref;
+        }
+    }
+    ESP_LOGI(TAG, "options: wake word %s, barge-in %s (echo delay %d samples)", s_wake ? "on" : "off",
+             s_afe_on ? "on" : "off", s_ref_delay);
+}
+
+void options_close()
+{
+    wake_mic_close();
+    assistant_afe_close();
+    s_afe_on = false;
+    heap_caps_free(s_acc_mic);
+    heap_caps_free(s_acc_ref);
+    s_acc_mic = s_acc_ref = nullptr;
+    taskENTER_CRITICAL(&s_ref_mux);
+    int16_t *ring = s_ref_ring;
+    s_ref_ring = nullptr;
+    taskEXIT_CRITICAL(&s_ref_mux);
+    heap_caps_free(ring);
+    assistant_wake_close();
+    free(s_wake_buf);
+    s_wake_buf = nullptr;
+    s_wake = false;
+}
+
 void session_task(void *)
 {
     bool ok = open_encoder();
@@ -617,39 +674,26 @@ void session_task(void *)
     }
     s_connected = false;
     s_state = ok ? ASSISTANT_CHAT_CONNECTING : ASSISTANT_CHAT_ERROR;
-    s_wake = ok && phone_pref_get("wake", 1) && assistant_wake_open();
-    if (s_wake) {
-        s_wake_buf = static_cast<int16_t *>(malloc(assistant_wake_chunk() * sizeof(int16_t)));
-        s_wake = s_wake_buf != nullptr;
-    }
-    s_ref_delay = phone_pref_get("aecd", REF_DELAY_DEFAULT);
-    if (s_wake && phone_pref_get("barge", 1)) {
-        /* the I2S channels first (stage 3b: created after the front-end, they found no DMA memory) */
-        s_ref_ring = static_cast<int16_t *>(heap_caps_calloc(REF_RING, sizeof(int16_t), MALLOC_CAP_SPIRAM));
-        s_ref_buf = static_cast<int16_t *>(heap_caps_malloc(FRAME_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-        s_afe_on = s_ref_ring && s_ref_buf && open_codecs();
-        close_codecs();
-        s_afe_on = s_afe_on && assistant_afe_open();
-        if (s_afe_on) {
-            const int chunk = assistant_afe_chunk();
-            s_acc_mic = static_cast<int16_t *>(heap_caps_malloc(chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-            s_acc_ref = static_cast<int16_t *>(heap_caps_malloc(chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM));
-            s_afe_on = s_acc_mic && s_acc_ref;
-        }
-        ESP_LOGI(TAG, "barge-in with the wake word: %s (echo delay %d samples)", s_afe_on ? "on" : "off", s_ref_delay);
-    }
-    if (!s_ref_buf) {
-        s_ref_buf = static_cast<int16_t *>(heap_caps_malloc(FRAME_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    s_ref_buf = static_cast<int16_t *>(heap_caps_calloc(FRAME_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (ok) {
+        options_open();
     }
 
     bool run = true;
     while (run) {
         int cmd;
         /* while talking the microphone read paces the loop */
-        while (xQueueReceive(s_cmds, &cmd, (s_talking || (s_wake && s_state == ASSISTANT_CHAT_IDLE)) ? 0 : pdMS_TO_TICKS(100)) == pdPASS) {
+        while (xQueueReceive(s_cmds, &cmd, (s_talking || (s_wake && s_wake_want && s_state == ASSISTANT_CHAT_IDLE)) ? 0 : pdMS_TO_TICKS(100)) == pdPASS) {
             switch (cmd) {
             case CMD_STOP:
                 run = false;
+                break;
+            case CMD_OPTIONS:
+                /* off: at once (the models stay until no conversation is open); on: once they are loaded */
+                s_wake_want = phone_pref_get("wake", 1);
+                s_barge_want = phone_pref_get("barge", 1);
+                s_options_changed = true;
+                ESP_LOGI(TAG, "switches: wake word %d, barge-in %d", s_wake_want, s_barge_want);
                 break;
             case CMD_CONNECTED:
                 s_connected = true;
@@ -722,6 +766,11 @@ void session_task(void *)
         if (!run) {
             break;
         }
+        if (s_options_changed && !s_talking && s_chat) {
+            s_options_changed = false;
+            options_close();
+            options_open();
+        }
         if (s_talking && s_mic_open) {
             pump_microphone();
             /* the whole answer has been played: listen again */
@@ -736,10 +785,10 @@ void session_task(void *)
                 }
             }
         } else if (s_wake) {
-            if (s_state == ASSISTANT_CHAT_IDLE) {
+            if (s_state == ASSISTANT_CHAT_IDLE && s_wake_want) {
                 wake_pump();
             } else {
-                wake_mic_close();      /* not connected: leave the I2S clock alone */
+                wake_mic_close();      /* not connected, or the switch is off: leave the I2S clock alone */
             }
         }
     }
@@ -760,23 +809,9 @@ void session_task(void *)
     }
     free(s_enc_buf);
     wake_mic_close();
-    assistant_afe_close();
-    s_afe_on = false;
-    heap_caps_free(s_acc_mic);
-    heap_caps_free(s_acc_ref);
+    options_close();
     heap_caps_free(s_ref_buf);
-    s_acc_mic = s_acc_ref = s_ref_buf = nullptr;
-    taskENTER_CRITICAL(&s_ref_mux);
-    int16_t *ring = s_ref_ring;
-    s_ref_ring = nullptr;
-    taskEXIT_CRITICAL(&s_ref_mux);
-    heap_caps_free(ring);
-    if (s_wake || s_wake_buf) {
-        assistant_wake_close();
-        free(s_wake_buf);
-        s_wake_buf = nullptr;
-        s_wake = false;
-    }
+    s_ref_buf = nullptr;
     free(s_mic_buf);
     s_enc_buf = nullptr;
     s_mic_buf = nullptr;
@@ -844,6 +879,11 @@ extern "C" void assistant_chat_stop(void)
         free(msg);
     }
     s_state = ASSISTANT_CHAT_OFF;
+}
+
+extern "C" void assistant_chat_options_changed(void)
+{
+    post(CMD_OPTIONS);
 }
 
 extern "C" void assistant_chat_button(void)

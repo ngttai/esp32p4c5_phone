@@ -43,6 +43,8 @@ void assistant_chat_stop(void);
  * cut the answer and listen again while speaking.
  */
 void assistant_chat_button(void);
+/** The "wake" or "barge" preference changed; the session applies it once no conversation is open. */
+void assistant_chat_options_changed(void);
 assistant_chat_state_t assistant_chat_state(void);
 /** Next text or emotion from the server; false when there is none. */
 bool assistant_chat_poll(assistant_chat_msg_t *msg);

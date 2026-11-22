@@ -305,6 +305,49 @@ void show_chat_state(int chat)
     lv_obj_set_state(s_mic, LV_STATE_DISABLED, !enabled);
 }
 
+lv_obj_t *s_opts;       // options panel of the conversation page, opened by the gear
+
+void on_gear(lv_event_t *)
+{
+    if (lv_obj_has_flag(s_opts, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_remove_flag(s_opts, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_opts, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+/* The switch carries its preference key; the session applies it once no conversation is open */
+void on_option(lv_event_t *e)
+{
+    const char *key = static_cast<const char *>(lv_event_get_user_data(e));
+    phone_pref_set(key, lv_obj_has_state(lv_event_get_target_obj(e), LV_STATE_CHECKED) ? 1 : 0);
+    assistant_chat_options_changed();
+}
+
+void add_option(lv_obj_t *panel, const char *text, const char *key)
+{
+    lv_obj_t *row = lv_obj_create(panel);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 12, 0);
+    lv_obj_remove_flag(row, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_t *label = lv_label_create(row);
+    lv_label_set_text(label, text);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_flex_grow(label, 1);
+    lv_obj_set_style_text_font(label, phone_font_by_size(18), 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_t *sw = lv_switch_create(row);
+    lv_obj_set_style_bg_color(sw, lv_color_hex(COLOR_ACCENT), static_cast<lv_style_selector_t>(LV_PART_INDICATOR) |
+                              static_cast<lv_style_selector_t>(LV_STATE_CHECKED));
+    if (phone_pref_get(key, 1)) {
+        lv_obj_add_state(sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(sw, on_option, LV_EVENT_VALUE_CHANGED, const_cast<char *>(key));
+}
+
 void on_mic(lv_event_t *)
 {
     assistant_chat_button();
@@ -557,6 +600,34 @@ void build_chat(lv_obj_t *root, int root_w, int root_h)
     lv_obj_add_flag(s_mic_label, LV_OBJ_FLAG_HIDDEN);
     s_mic_icon = make_mic_icon(s_mic);
     lv_obj_center(s_mic_icon);
+
+    /* options: last, so the panel is drawn over the face and the bubbles */
+    lv_obj_t *gear = lv_button_create(s_chat);
+    lv_obj_remove_style_all(gear);
+    lv_obj_set_size(gear, 44, 44);
+    lv_obj_align(gear, LV_ALIGN_TOP_RIGHT, -8, 8);
+    lv_obj_set_ext_click_area(gear, 10);
+    lv_obj_add_event_cb(gear, on_gear, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *gear_icon = lv_label_create(gear);
+    lv_label_set_text(gear_icon, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_font(gear_icon, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(gear_icon, lv_color_hex(COLOR_SUB), 0);
+    lv_obj_center(gear_icon);
+    s_opts = lv_obj_create(s_chat);
+    lv_obj_remove_style_all(s_opts);
+    lv_obj_set_width(s_opts, root_w * 80 / 100);
+    lv_obj_set_height(s_opts, LV_SIZE_CONTENT);
+    lv_obj_align(s_opts, LV_ALIGN_TOP_RIGHT, -8, 56);
+    lv_obj_set_style_bg_opa(s_opts, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(s_opts, lv_color_hex(COLOR_CARD), 0);
+    lv_obj_set_style_radius(s_opts, 14, 0);
+    lv_obj_set_style_pad_all(s_opts, 16, 0);
+    lv_obj_set_style_pad_row(s_opts, 14, 0);
+    lv_obj_set_flex_flow(s_opts, LV_FLEX_FLOW_COLUMN);
+    lv_obj_remove_flag(s_opts, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_opts, LV_OBJ_FLAG_HIDDEN);
+    add_option(s_opts, T("Gọi \"Hi ESP\" để bắt đầu", "Say \"Hi ESP\" to start"), "wake");
+    add_option(s_opts, T("Nói \"Hi ESP\" để ngắt lời", "Say \"Hi ESP\" to interrupt"), "barge");
 }
 
 void build_ui()
