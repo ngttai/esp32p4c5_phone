@@ -1476,8 +1476,12 @@ void cell_refresh()
     if (!s_cell_text) {
         return;
     }
-    static char text[3072];
-    phone_celltest_text(text, sizeof(text));
+    constexpr size_t TEXT_SIZE = 3072;
+    static char *text = static_cast<char *>(heap_caps_malloc(TEXT_SIZE, MALLOC_CAP_SPIRAM));   // not in SRAM
+    if (!text) {
+        return;
+    }
+    phone_celltest_text(text, TEXT_SIZE);
     const size_t len = strlen(text) + (phone_celltest_running() ? 0 : 1);
     if (len == s_cell_shown) {
         return;                     /* unchanged: no relayout of the long label */

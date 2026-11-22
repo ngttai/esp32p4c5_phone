@@ -147,6 +147,23 @@ static StackType_t s_audio_input_task_stack[CONFIG_XIAOZHI_AUDIO_TASK_STACK_SIZE
 
 static void esp_xiaozhi_chat_audio_input(void *pvParameter);
 
+/* A disabled bool option is not defined at all: give the dynamic path a 0/1 value to test */
+#if CONFIG_XIAOZHI_STACK_IN_PSRAM
+#define XIAOZHI_STACK_IN_PSRAM 1
+#else
+#define XIAOZHI_STACK_IN_PSRAM 0
+#endif
+
+/* A task made with xTaskCreate...WithCaps must end with vTaskDeleteWithCaps, or its stack leaks */
+static void esp_xiaozhi_chat_task_delete_self(void)
+{
+#if CONFIG_XIAOZHI_AUDIO_TASK_ALLOC_STATIC
+    vTaskDelete(NULL);
+#else
+    vTaskDeleteWithCaps(NULL);
+#endif
+}
+
 static void esp_xiaozhi_chat_aes_ctr_init(esp_xiaozhi_chat_aes_ctr_context_t *ctx)
 {
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
@@ -861,7 +878,7 @@ static void esp_xiaozhi_chat_audio_input_exit(EventGroupHandle_t evt)
     if (evt != NULL) {
         xEventGroupSetBits(evt, ESP_XIAOZHI_CHAT_RECV_TASK_EXITED);
     }
-    vTaskDelete(NULL);
+    esp_xiaozhi_chat_task_delete_self();
 }
 
 static esp_err_t esp_xiaozhi_chat_create_audio_input_task(esp_xiaozhi_chat_t *xiaozhi_chat)
@@ -881,7 +898,7 @@ static esp_err_t esp_xiaozhi_chat_create_audio_input_task(esp_xiaozhi_chat_t *xi
                                                 core);
     ESP_RETURN_ON_FALSE(task_handle != NULL, ESP_ERR_NO_MEM, TAG, "Failed to create audio input task");
 #else
-    UBaseType_t stack_caps = CONFIG_XIAOZHI_STACK_IN_PSRAM
+    UBaseType_t stack_caps = XIAOZHI_STACK_IN_PSRAM
                              ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
                              : (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     BaseType_t task_ret = xTaskCreatePinnedToCoreWithCaps(esp_xiaozhi_chat_audio_input,
@@ -892,7 +909,7 @@ static esp_err_t esp_xiaozhi_chat_create_audio_input_task(esp_xiaozhi_chat_t *xi
                                                           &task_handle,
                                                           core,
                                                           stack_caps);
-    if (task_ret != pdPASS && CONFIG_XIAOZHI_STACK_IN_PSRAM) {
+    if (task_ret != pdPASS && XIAOZHI_STACK_IN_PSRAM) {
         ESP_LOGW(TAG, "Audio task PSRAM allocation failed, retrying with internal memory");
         stack_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
         task_ret = xTaskCreatePinnedToCoreWithCaps(esp_xiaozhi_chat_audio_input,
@@ -984,7 +1001,7 @@ static void esp_xiaozhi_chat_audio_input(void *pvParameter)
     EventGroupHandle_t evt = NULL;
     if (!xiaozhi_chat || !xiaozhi_chat->udp || !xiaozhi_chat->udp->audio_receive_events) {
         ESP_LOGE(TAG, "Invalid parameter in audio input task");
-        vTaskDelete(NULL);
+        esp_xiaozhi_chat_task_delete_self();
         return;
     }
 

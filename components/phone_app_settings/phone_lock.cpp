@@ -892,7 +892,7 @@ extern "C" void phone_lock_start(void)
         return;
     }
     s_wake_done = xSemaphoreCreateBinary();
-    if (xTaskCreate(worker, "lock", 4096, nullptr, 4, &s_worker) != pdPASS) {
+    if (xTaskCreate(worker, "lock", 3072, nullptr, 4, &s_worker) != pdPASS) {
         ESP_LOGE(TAG, "Lock task create failed");
         return;
     }

@@ -283,7 +283,7 @@ bool power_on()
     }
     esp_modem_dte_config_t dte = ESP_MODEM_DTE_DEFAULT_CONFIG();
     dte.dte_buffer_size = 2048;
-    dte.task_stack_size = 4096;
+    dte.task_stack_size = 2048;   // uses ~0.6 KB
     dte.task_priority = 6;
     dte.uart_config.port_num = PORT;
     dte.uart_config.baud_rate = BAUD_BOOT;
@@ -734,7 +734,7 @@ extern "C" void phone_cell_start(void)
     s_want = phone_pref_get("cell", 0) != 0;
     s_want_data = phone_pref_get("cdata", 0) != 0;
     /* esp_modem and lwIP PPP: internal stack (the UART driver, no flash access) */
-    if (!s_lock || xTaskCreate(cell_task, "phone_cell", 6144, nullptr, 3, &s_task) != pdPASS) {
+    if (!s_lock || xTaskCreate(cell_task, "phone_cell", 4096, nullptr, 3, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "cannot start");
         s_task = nullptr;
     }

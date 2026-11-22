@@ -202,7 +202,7 @@ extern "C" void phone_volume_start(void)
     s_queue = xQueueCreate(8, sizeof(KeyEvent));
     button_handle_t btns[BSP_BUTTON_NUM];
     if (!s_queue || bsp_iot_button_create(btns, nullptr, BSP_BUTTON_NUM) != ESP_OK ||
-            xTaskCreate(key_task, "vol_keys", 3072, nullptr, 4, nullptr) != pdPASS) {
+            xTaskCreate(key_task, "vol_keys", 2048, nullptr, 4, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "Volume keys unavailable");
         return;
     }

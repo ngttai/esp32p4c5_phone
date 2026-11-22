@@ -359,7 +359,7 @@ extern "C" void phone_net_start(void)
     args.callback = retry_cb;
     args.name = "wifi_retry";
     esp_timer_create(&args, &s_retry);
-    xTaskCreate(worker, "stat", 6144, nullptr, 3, nullptr);
+    xTaskCreate(worker, "stat", 3072, nullptr, 3, nullptr);
 }
 
 extern "C" void phone_net_get_status(phone_net_status_t *out)

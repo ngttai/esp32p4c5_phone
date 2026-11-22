@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -26,7 +27,10 @@ esp_codec_dev_handle_t s_spk;   // only touched by whoever holds s_busy: the bee
 
 void beep_task(void *)
 {
-    static int16_t tone[SAMPLES];
+    constexpr int SILENCE = RATE * TAIL_MS / 1000;
+    /* In PSRAM and only while beeping (8.6 KB); the codec copies them into its DMA buffers */
+    auto *tone = static_cast<int16_t *>(heap_caps_malloc(SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    auto *silence = static_cast<int16_t *>(heap_caps_calloc(SILENCE, sizeof(int16_t), MALLOC_CAP_SPIRAM));
     if (!s_spk) {
         s_spk = bsp_audio_codec_speaker_init();
     }
@@ -35,7 +39,7 @@ void beep_task(void *)
     fs.channel = 1;
     fs.bits_per_sample = 16;
     /* The codec is opened only for the tone, so the speaker amplifier stays off otherwise */
-    if (s_spk && esp_codec_dev_open(s_spk, &fs) == ESP_CODEC_DEV_OK) {
+    if (tone && silence && s_spk && esp_codec_dev_open(s_spk, &fs) == ESP_CODEC_DEV_OK) {
         esp_codec_dev_set_out_vol(s_spk, s_volume.load());
         for (int i = 0; i < SAMPLES; i++) {
             /* 10 ms fade in/out avoids clicks */
@@ -43,15 +47,16 @@ void beep_task(void *)
             float gain = i < edge ? (float)i / edge : (i > SAMPLES - edge ? (float)(SAMPLES - i) / edge : 1.0f);
             tone[i] = (int16_t)(12000.0f * gain * sinf(2.0f * (float)M_PI * TONE_HZ * i / RATE));
         }
-        static int16_t silence[RATE * TAIL_MS / 1000];
         esp_codec_dev_write(s_spk, silence, RATE * LEAD_MS / 1000 * sizeof(int16_t));
-        const int ret = esp_codec_dev_write(s_spk, tone, sizeof(tone));
-        esp_codec_dev_write(s_spk, silence, sizeof(silence));
+        const int ret = esp_codec_dev_write(s_spk, tone, SAMPLES * sizeof(int16_t));
+        esp_codec_dev_write(s_spk, silence, SILENCE * sizeof(int16_t));
         ESP_LOGI(TAG, "beep at %d%%: write %d", s_volume.load(), ret);
         esp_codec_dev_close(s_spk);
     } else {
         ESP_LOGW(TAG, "Speaker not available");
     }
+    heap_caps_free(tone);
+    heap_caps_free(silence);
     s_busy = false;
     vTaskDelete(nullptr);
 }

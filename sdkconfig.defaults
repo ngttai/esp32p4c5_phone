@@ -137,3 +137,8 @@ CONFIG_LWIP_PPP_SUPPORT=y
 CONFIG_ESP_MODEM_C_API_STR_MAX=1024
 # 4G: DNS follows the default netif (else the carrier DNS stays after PPP and fails over Wi-Fi)
 CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
+
+# SRAM: the LVGL task uses ~8.3 KB of its stack after an hour of use (all apps)
+CONFIG_BSP_DISPLAY_LVGL_TASK_STACK_SIZE=12288
+# SRAM: the Assistant audio task stack (8 KB) only while it runs, not a static buffer kept for ever
+CONFIG_XIAOZHI_AUDIO_TASK_ALLOC_DYNAMIC=y
