@@ -1152,6 +1152,7 @@ void sync_sound_page()
 /* Network speed test page (Settings > Debug): Wi-Fi now, the 4G modem later */
 lv_obj_t *s_speed_check[2];
 lv_obj_t *s_speed_text;
+lv_obj_t *s_speed_result[2];        /* last finished download / upload, with its server */
 phone_speed_target_t s_speed_target = PHONE_SPEED_LAN;
 
 void speed_update_checks()
@@ -1170,6 +1171,15 @@ void speed_refresh()
     }
     phone_speed_state_t st;
     phone_speedtest_get(&st);
+    if (!st.running && !st.failed && st.ms > 0 && s_speed_result[st.upload ? 1 : 0]) {
+        char v[96];
+        snprintf(v, sizeof(v), "%u.%02u Mbps  (%s)", static_cast<unsigned>(st.kbps / 1000),
+                 static_cast<unsigned>(st.kbps % 1000 / 10), st.host);
+        lv_obj_t *res = s_speed_result[st.upload ? 1 : 0];
+        if (strcmp(lv_label_get_text(res), v) != 0) {
+            lv_label_set_text(res, v);
+        }
+    }
     if (!st.running && !st.failed && st.ms == 0) {
         lv_label_set_text(s_speed_text, T("Chọn máy chủ rồi bấm Tải xuống hoặc Tải lên (10 giây).\n"
                                           "Máy tính: chạy tools/speed_server.py, cùng mạng với board.",
@@ -1223,9 +1233,19 @@ void build_speed_page(lv_obj_t *root)
     grouped_row(g, T(LV_SYMBOL_UPLOAD "  Tải lên", LV_SYMBOL_UPLOAD "  Upload"), on_speed_start, reinterpret_cast<void *>(1));
     group_end(g);
 
-    g = make_group(p, T("Kết quả", "Result"));
+    g = make_group(p, T("Trạng thái", "Status"));
     lv_obj_set_style_pad_all(g, 16, 0);
     s_speed_text = make_text(g, "", COLOR_TEXT);
+
+    g = make_group(p, T("Kết quả", "Results"));
+    const char *dirs[2] = {T("Tải xuống", "Download"), T("Tải lên", "Upload")};
+    for (int i = 0; i < 2; i++) {
+        s_speed_result[i] = kv_row(g, dirs[i]);
+        lv_obj_set_style_max_width(s_speed_result[i], 300, 0);
+        lv_label_set_long_mode(s_speed_result[i], LV_LABEL_LONG_MODE_DOTS);
+        lv_label_set_text(s_speed_result[i], "--");
+    }
+    group_end(g);
     speed_refresh();
 }
 
@@ -1373,12 +1393,12 @@ void cell_refresh()
 
 void build_cell_page(lv_obj_t *root)
 {
-    lv_obj_t *p = make_page(root, "4G", PAGE_CELL);
-    lv_obj_t *g = make_group(p, T("Đo", "Test"));
-    grouped_row(g, T(LV_SYMBOL_PLAY "  Đo", LV_SYMBOL_PLAY "  Run"), [](lv_event_t *) {
+    lv_obj_t *p = make_page(root, T("Kiểm tra module 4G", "4G module test"), PAGE_CELL);
+    lv_obj_t *g = make_card(p);
+    grouped_row(g, T(LV_SYMBOL_PLAY "  Bắt đầu kiểm tra", LV_SYMBOL_PLAY "  Run test"), [](lv_event_t *) {
         if (!phone_celltest_start() && phone_cell_busy()) {
-            lv_label_set_text(s_cell_text, T("4G đang bật: tắt 4G (Cài đặt > Mạng di động) rồi đo lại.",
-                                             "4G is on: turn it off (Settings > Mobile network), then run again."));
+            lv_label_set_text(s_cell_text, T("4G đang bật: tắt 4G (Cài đặt > Mạng di động) rồi kiểm tra lại.",
+                                             "4G is on: turn it off (Settings > Mobile network), then run the test again."));
             s_cell_shown = SIZE_MAX - 1;
             return;
         }
@@ -1452,8 +1472,8 @@ void mem_refresh()
 void build_mem_page(lv_obj_t *root)
 {
     lv_obj_t *p = make_page(root, T("Tốc độ bộ nhớ", "Memory speed"), PAGE_MEM);
-    lv_obj_t *g = make_group(p, T("Đo", "Test"));
-    grouped_row(g, T(LV_SYMBOL_PLAY "  Đo", LV_SYMBOL_PLAY "  Run"), [](lv_event_t *) {
+    lv_obj_t *g = make_card(p);
+    grouped_row(g, T(LV_SYMBOL_PLAY "  Đo SRAM/PSRAM", LV_SYMBOL_PLAY "  Run on SRAM/PSRAM"), [](lv_event_t *) {
         phone_membench_start();
         mem_refresh();
     }, nullptr);
@@ -1704,7 +1724,7 @@ void build_ui()
     add_tile(lv_obj_get_parent(mon), kIconChart, 0x27AE60);
     group_row(g, LV_SYMBOL_DOWNLOAD, 0x2F80ED, T("Tốc độ mạng", "Network speed"), nullptr, PAGE_SPEED);
     group_row(g, LV_SYMBOL_CHARGE, 0xF2C94C, T("Tốc độ bộ nhớ", "Memory speed"), nullptr, PAGE_MEM);
-    group_row(g, "4G", 0x27AE60, T("4G (đo module)", "4G (module probe)"), nullptr, PAGE_CELL);
+    group_row(g, "4G", 0x27AE60, T("Kiểm tra module 4G", "4G module test"), nullptr, PAGE_CELL);
     group_end(g);
 
     lv_obj_t *wifi = make_page(root, "Wi-Fi", PAGE_WIFI);
