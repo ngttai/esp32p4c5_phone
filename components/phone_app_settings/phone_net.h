@@ -26,6 +26,8 @@ bool phone_net_online(void);
 bool phone_net_c5_version(char *out, size_t len);
 /** User-initiated connect: saves the network at the front of the list and connects; auto reconnect pauses until it succeeds. */
 void phone_net_connect(const char *ssid, const char *pass);
+/** Stop an auto-reconnect attempt (the Wi-Fi page scans), Wi-Fi stays on; phone_net_enable() resumes it. */
+void phone_net_pause_auto(void);
 /** User turns Wi-Fi off: drop the link and stop auto reconnect. */
 void phone_net_disconnect(void);
 /** User turns Wi-Fi on: reconnect through the saved list and resume auto reconnect. */

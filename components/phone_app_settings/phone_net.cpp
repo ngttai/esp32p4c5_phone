@@ -409,7 +409,21 @@ extern "C" void phone_net_disconnect(void)
     s_auto = false;
     esp_timer_stop(s_retry);
     esp_wifi_disconnect();
+    {
+        Lock l;
+        s_st.wifi_connecting = false;   /* no DISCONNECTED event when it was only trying */
+    }
     phone_cell_wifi_changed();          /* Wi-Fi off by the user: mobile data at once */
+}
+
+extern "C" void phone_net_pause_auto(void)
+{
+    s_user_op = true;
+    s_auto = false;
+    esp_timer_stop(s_retry);
+    esp_wifi_disconnect();
+    Lock l;
+    s_st.wifi_connecting = false;
 }
 
 extern "C" void phone_net_set_enabled(bool on)

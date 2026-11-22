@@ -8,12 +8,13 @@ ESP-Brookesia phone firmware for the KSDIY ESP32-P4C5 4.3" board, on top of the 
 
 Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 panel, ST7102 over MIPI DSI, ST7123 touch), with a settings app and the system behavior of a small phone:
 
-- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Radio, Video, Files, Second screen, USB camera, AI Assistant, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, Wi-Fi level and battery.
+- **Launcher** with the Settings, Level, Camera, Gallery, Weather, Music, Radio, Video, Files, Second screen, USB camera, AI Assistant, Calculator, 2048 and Squareline demo apps. The status bar shows the clock, the 4G signal (with a "4G" mark while mobile data carries the traffic), the Wi-Fi level (grey while Wi-Fi is on but not connected) and the battery.
 - **Settings app** (Vietnamese / English):
-  - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect, forget.
+  - Wi-Fi: scan, connect, up to 5 saved networks with auto-reconnect (the last used network first), forget. The Wi-Fi switch is kept across restarts.
+  - Mobile network (4G): 4G and mobile data switches, status, operator, signal, data state and address, data used (kept across restarts, with a reset), APN and address given by the network, SIM (ICCID, IMSI) and module. A hint explains a problem (no SIM, PIN, network refusal, no data). See [4G (mobile data)](#4g-mobile-data).
   - Display: brightness, screen timeout.
   - Sound: volume and mute.
-  - Language, time zone (SNTP once Wi-Fi is up).
+  - Language, time zone (SNTP once Wi-Fi or 4G is up).
   - Power: power off and restart.
   - About: device (chip, RAM, PSRAM and flash size, MAC), software versions (app, ESP-IDF, ESP32-C5 firmware, ESP-Hosted, LVGL, Brookesia), detected hardware, microSD size, battery and charger.
   - Debug: system monitor, a small box over every screen with the load of both CPU cores, the frames drawn per second, the free / usable internal SRAM (with the lowest and the largest block), the DMA-capable RAM and the PSRAM; the same figures go to the log (tag `SYSMON`) every 5 s, with the three busiest tasks. Turning it on also logs an internal RAM report (tag `MEMDUMP`): task stacks, heap blocks by size, the largest ones and the blocks taken since the last report.
@@ -22,12 +23,13 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
     - `min 114K`: the lowest free internal RAM since boot. It only goes down (it does not grow back when apps free memory); near 0 means the phone once almost ran out.
     - `max 86K`: the largest free contiguous block **now**, the biggest single allocation that can succeed at this moment (`heap_caps_get_largest_free_block()`). Free 123K with a largest block of 86K means the free memory is split; it is not the largest block ever allocated.
     - `DMA`: the part of the internal RAM that DMA can reach (microSD, I2S, SDIO to the C5, USB): free now and largest block. The one to watch: the USB camera rebooted when it fell below about 70K, before its buffers moved to PSRAM.
-  - Debug: Network speed (Wi-Fi now, the 4G modem later), a 10 s HTTP download or upload to a PC on the same network running `tools/speed_server.py` (found by its UDP broadcast) or to speed.cloudflare.com; shows Mbps and the lowest free SRAM / DMA RAM during the test (log tag `SPEEDTEST`). Measured with a 32 KB TCP window: about 11 Mbps down and 4 to 7 Mbps up to a PC, 3 to 5 Mbps down from Cloudflare.
+  - Debug: Network speed (over Wi-Fi, or 4G when Wi-Fi is off), a 10 s HTTP download or upload to a PC on the same network running `tools/speed_server.py` (found by its UDP broadcast) or to speed.cloudflare.com; shows the running test (Mbps, the lowest free SRAM / DMA RAM; log tag `SPEEDTEST`) and the last download and upload results. Measured with a 32 KB TCP window over Wi-Fi: about 11 Mbps down and 4 to 7 Mbps up to a PC, 3 to 5 Mbps down from Cloudflare; over 4G about 0.6 to 0.7 Mbps each way.
+  - Debug: 4G module test, with 4G off: powers the module, then identity, SIM, network, the UART rates it takes, CMUX and a PPP dial; every command and answer goes to the page and the log (tag `CELL`).
   - Debug: Memory speed, write (memset), read and copy (memcpy) in MB/s on PSRAM (1 MB buffers, larger than the 256 KB L2 cache) and on internal SRAM (log tag `MEMBENCH`). Measured with PSRAM at 200 MHz (HEX, x16): PSRAM write 166, read 188, copy 81; SRAM write 1007, read 1212, copy 551. At 250 MHz the PSRAM was 12 to 20% faster (read 210, write 199, copy 91) but SD card writes timed out, so it stays at 200 MHz. The same page tests the microSD card: an 8 MB file written then read through FAT with a 32 KB buffer in SRAM and a 64 KB buffer in PSRAM, then deleted (log tag `SDBENCH`); measured on a 32 GB card at 40 MHz: write 3.9 to 5.4 MB/s, read 14 to 16.7 MB/s.
 - **Level app**: two-axis spirit level on the IMU accelerometer. The bubble floats toward the higher side and turns green within 0.5° on both axes; Calibrate stores the current position as zero.
 - **Camera app**: live preview of the CSI sensor (cropped, scaled and rotated by the PPA) and photos saved as JPEG (hardware encoder) in `/sdcard/DCIM`. The sensor is powered down when the app is in the background.
 - **Gallery app**: the photos of `/sdcard/DCIM` as a grid of thumbnails, newest first, with a viewer (previous / next by buttons or swipe) and delete. Photos are decoded by the hardware JPEG decoder and scaled by the PPA.
-- **Weather app**: current conditions and a 7-day forecast from [open-meteo.com](https://open-meteo.com) (HTTPS, no key) for a city picked from a list. Needs Wi-Fi with Internet access.
+- **Weather app**: current conditions and a 7-day forecast from [open-meteo.com](https://open-meteo.com) (HTTPS, no key) for a city picked from a list. Needs Internet (Wi-Fi or 4G).
 - **Music app**: plays the MP3, WAV, FLAC, AAC, M4A and OGG files of the card (up to three folder levels deep) on the speaker (mono), with play / pause, previous, next, repeat (off, list, one track), shuffle and auto-advance. Drag the progress bar to seek (MP3, AAC, WAV and FLAC). A star on every row marks favorites, kept in `/sdcard/Music/favorites.txt`, and a filter shows all tracks or the favorites only. A tap on the artwork switches it to a rainbow spectrum (remembered); a crossed speaker badge breathes over it while the phone is muted. MP3 files show the title, artist and duration of their ID3 tag, read in the background, and the JPEG cover of the tag (baseline JPEG only; a colored placeholder otherwise). It keeps playing in the background and with the screen off, and follows the phone volume. The newest player gets the speaker: Music and Radio stop for each other, and Video or the AI Assistant stop them (`phone_audio_speaker_take_yielding()`; the holder gives the speaker back at once).
 - **Radio app**: internet radio through the GMF simple player, as in MetalioClaw4: HLS (`.m3u8`; AAC, MP3 or MPEG-TS segments) and direct Icecast / Shoutcast streams (MP3, AAC, OGG, FLAC; the type is found in the data, so URLs without an extension work). For direct streams the song title of the ICY metadata replaces "Playing" (the metadata blocks are taken out of the sound in the HTTP read hook; `patches/gmf_io-http-on-header.patch` passes the response headers, `icy-metaint` and `Content-Type`, to that hook). The app shows station name, status, stream format, a 12-band spectrum (`gmf_fft`), previous / play-stop / next, volume, and the station list. The stations are **only** in `/sdcard/radio/stations.json` on the card, there is no list in the firmware: `{"stations": [{"name": "VOV1", "url": "https://.../playlist.m3u8"}, ...]}` (or a bare array), up to 100 stations and 64 KB; entries without a name or an http(s) URL are skipped. A sample with 13 Vietnamese stations and 5 English ones (music, news) is in `sdcard/radio/stations.json`: copy it to the card (USB drive of the Files app). Without the file the app says why and offers Retry; it never writes to the card. The last station is remembered and plays when the app opens. It keeps playing in the background and with the screen off; closing the app stops it. Played at the rate of the stream, mixed to mono. The HLS `.aac` segments start with an ID3 tag that the GMF decoder takes for MP3: `patches/gmf_audio-hls-aac.patch` (from MetalioClaw4) is applied to `managed_components/espressif__gmf_audio` by `CMakeLists.txt` at every configure.
 - **Video app**: plays videos of the card in full screen (the status bar hides), with play / pause, previous / next and a progress bar to seek. Landscape videos are turned to fill the portrait screen and the controls turn with them.
@@ -44,7 +46,7 @@ Runs the ESP-Brookesia Phone UI on the KSDIY ESP32-P4C5 4.3" board (480 x 800 pa
 - **USB camera app**: live picture of a UVC webcam on the Type-A host socket (MJPEG at 640 x 480, hardware JPEG decoder; the USB host of the ESP32-P4 only takes isochronous endpoints of one transaction per microframe, see `patches/usb_host_uvc-single-transaction-isoc.patch`) and photos saved in `/sdcard/DCIM`. The app turns the 5 V boost on for the socket and releases the USB port in the background. Leave the USB HS Type-C socket unplugged while a webcam is in use: both sockets share one port.
 - **AI Assistant app**: voice assistant on the [xiaozhi.me](https://xiaozhi.me) service through the `esp_xiaozhi` component. The first run shows the activation code to enter on the site. Then one button starts a conversation: the microphone is sent as Opus over WebSocket, the answer is played on the speaker and shown as chat bubbles under an animated face, and the assistant listens again after each answer until the button or the server ends the conversation. Half duplex. While the app is open and idle, the wake word "Hi ESP" (esp-sr WakeNet 9, model in the `model` partition) starts a conversation like the button; the session tasks keep their stacks in PSRAM, so the app leaves about 110 KB of internal RAM free.
 - **Files app**: browse the microSD card, read text files (`.txt`, `.json`, `.md`, `.log`, `.csv`, `.m3u8`, `.srt`, ..., first 32 KB), see the details of a file, delete files and empty folders. The USB button lends the card to a PC as a USB drive (mass storage, high speed, on the USB HS Type-C socket) until it is turned off or the app is left; the card is never formatted. Measured with GNOME Disks on a 32 GB card: 7.2 MB/s read, 4.8 MB/s write. The automatic stop command (CMD12) of a multiple block write breaks during long bursts on this board (the SDMMC host is shared with the SDIO link of the ESP32-C5), so writes use SET_BLOCK_COUNT (CMD23) instead, through a local copy of `esp_driver_sdmmc` (see `components/esp_driver_sdmmc/README_LOCAL.md`); a card without CMD23 is written one sector at a time (about 450 KB/s). The Music, Video and Gallery apps keep files of the card open while they run, so close them first.
-- **Quick settings**: pull down from the top edge (the panel follows the finger): time, date, battery, a button to Settings, Wi-Fi and Silent tiles (a long press on Wi-Fi opens its Settings page) and brightness and volume sliders, shared with Settings and the volume keys. A swipe up from its handle or a tap below closes it; gestures made on it do not reach the launcher or the apps. Not on the lock screen.
+- **Quick settings**: pull down from the top edge (the panel follows the finger): time, date, battery, a button to Settings, Wi-Fi, Silent, 4G and Mobile data tiles (a long press on Wi-Fi, 4G or Mobile data opens its Settings page) and brightness and volume sliders, shared with Settings and the volume keys. A swipe up from its handle or a tap below closes it; gestures made on it do not reach the launcher or the apps. Not on the lock screen.
 - **Boot splash**: over every screen until the phone is ready, then it fades out. Chosen in menuconfig, `Phone boot splash` (`CONFIG_PHONE_BOOT_SPLASH`):
   - Logo: the animated logo, QOI frames at 15 fps made from a Lottie file by `components/phone_boot_splash/tools/make_splash.py`.
   - Simple (default): a hand-drawn line draws itself, then "Xin chào!" or "Hello!" (the phone language) fades in. Drawn by LVGL, no image; smoother than the logo.
@@ -67,11 +69,21 @@ Settings are stored in NVS (namespace `phone`).
 |---|---|
 | ![About](doc/about.jpg) | ![Sound page and volume panel](doc/sound_volume.jpg) |
 
+## 4G (mobile data)
+
+- Module: ML307C (LTE Cat.1, AT firmware) on a UART through a level shifter (no RTS/CTS). It runs from the battery: without one it does not answer. 4G is off by default; Settings > Mobile network or the quick settings tile turns it on (kept across restarts).
+- Mobile data: PPP through `esp_modem` at 921600 baud. The module does not take CMUX (`AT+CMUX` answers `+CME ERROR: 4`), so data runs in plain data mode: while data flows over 4G, the signal and operator stay at their last values.
+- Wi-Fi first: with 4G and mobile data on, the module stays registered (the signal keeps updating) and PPP waits ("Standby (Wi-Fi)"). PPP comes up when Wi-Fi has been lost for 15 s (at once when the user turns Wi-Fi off) and goes down when Wi-Fi has been back for 30 s. DNS follows the interface in use (`CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF`). The apps that need the Internet (Weather, Assistant, Radio) check Wi-Fi or 4G, and the Radio starts again as soon as either is back.
+- APN: the one the network gives (`AT+CGCONTRDP`), else a small table by operator. Tried with an Onomondo SIM (roaming on Viettel) and a Vinaphone SIM: both worked without any setting.
+- Speed: about 0.6 to 0.7 Mbps each way, the limit of the 921600 baud UART (about 0.74 Mbps with 8N1), whatever the operator.
+- Data used: the bytes through PPP, counted in `phone_cell.cpp` (linker wrappers of `esp_netif_transmit` / `esp_netif_receive`), saved in NVS every MB and when data goes down.
+
 ## Hardware Requirements
 
 * KSDIY ESP32-P4C5 4.3" board (ESP32-P4 rev v3.2, 16 MB flash, 32 MB PSRAM).
 * On-board ESP32-C5 with the ESP-Hosted co-processor firmware 2.12.13 (as shipped) for Wi-Fi.
 * On-board LSM6DS3TR-C IMU for the Level app.
+* Optional: SIM card in the on-board ML307C 4G module (needs the battery).
 * Optional: SC2336 or OV2710 camera module on the CSI connector (Camera app).
 * Optional: battery on J2 (battery level, running without USB), microSD card, speaker.
 
@@ -85,7 +97,8 @@ Settings are stored in NVS (namespace `phone`).
 - `main/`: `main.cpp` starts the BSP display, the LVGL lock, the phone UI, the app registry and the services below.
 - `components/phone_app_settings/`: the Settings app and the phone services:
   - `phone_app_settings.cpp`: Settings app pages.
-  - `phone_net.cpp`: Wi-Fi service (saved networks, auto-reconnect, SNTP).
+  - `phone_net.cpp`: Wi-Fi service (saved networks, auto-reconnect, SNTP), `phone_net_online()` (Wi-Fi or 4G).
+  - `phone_cell.cpp`: 4G service (module power, SIM, registration, signal, operator, PPP, Wi-Fi first, data counter); `phone_celltest.cpp`: the 4G module test of the Debug page.
   - `phone_power.cpp`: battery polling, power key, power menu (AXP2101 through the BSP).
   - `phone_lock.cpp`: lock screen and screen power policy.
   - `phone_volume.cpp`: volume keys and volume panel.
@@ -121,6 +134,7 @@ Settings are stored in NVS (namespace `phone`).
 - The USB host control transfer size is raised to 4096 bytes in `sdkconfig.defaults`: webcams have configuration descriptors of several kilobytes, and the default 256 bytes makes their enumeration fail.
 - TinyUSB has one vendor interface and one HID interface enabled in `sdkconfig.defaults`, for the Second screen app.
 - Wi-Fi goes through ESP-Hosted over SDIO; `sdkconfig.defaults` selects the ESP32-C5 as the co-processor.
+- 4G: `CONFIG_LWIP_PPP_SUPPORT`, `CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF` and a 1024-byte AT answer buffer (`CONFIG_ESP_MODEM_C_API_STR_MAX`) in `sdkconfig.defaults`.
 
 ## Build and Flash
 

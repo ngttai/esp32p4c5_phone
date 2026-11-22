@@ -68,6 +68,10 @@ bool phone_cell_busy(void);
 void phone_cell_get(phone_cell_info_t *out);
 /** Wi-Fi went up or down (from phone_net): the route choice is checked at once */
 void phone_cell_wifi_changed(void);
+/** Bytes through PPP (4G only, PPP framing included), kept in NVS across restarts; `since` = time of the last
+ * reset (0 when the clock was not set then) */
+void phone_cell_data_usage(unsigned long long *rx, unsigned long long *tx, long long *since);
+void phone_cell_data_usage_reset(void);
 /** Short state text for a tile or a row, in the phone language */
 const char *phone_cell_state_text(phone_cell_state_t state);
 

@@ -27,11 +27,13 @@
 #include "esp_hls_io.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "media_lib_adapter.h"
 #include "phone_audio.h"
+#include "phone_net.h"
 #include "phone_spectrum.hpp"
 
 namespace radio {
@@ -41,6 +43,7 @@ namespace {
 const char *TAG = "radio";
 constexpr int MAX_CONNECT_FAILURES = 3;     // attempts in a row without sound before giving up
 constexpr uint32_t RETRY_MS = 1200;
+constexpr uint32_t NET_WAIT_MS = 120000;     // no Internet (Wi-Fi lost, 4G not up yet): wait this long for it
 
 std::mutex s_mtx;                           // s_url
 std::string s_url;
@@ -479,6 +482,26 @@ void interrupt()
     }
 }
 
+/* Without Internet an attempt only fails: wait for Wi-Fi or 4G instead (not counted as a failure), and start
+ * again as soon as either is up. False when it did not come back, or the radio was stopped or changed meanwhile. */
+bool wait_for_internet(uint32_t gen)
+{
+    if (phone_net_online()) {
+        return true;
+    }
+    ESP_LOGW(TAG, "no Internet: waiting for Wi-Fi or 4G");
+    set_status(Status::RETRYING);
+    const int64_t end = esp_timer_get_time() + static_cast<int64_t>(NET_WAIT_MS) * 1000;
+    while (!s_quit && s_want && s_gen == gen && esp_timer_get_time() < end) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(300));
+        if (phone_net_online()) {
+            ESP_LOGI(TAG, "Internet is back: play again");
+            return true;
+        }
+    }
+    return false;
+}
+
 void play_task(void *)
 {
     int failures = 0;
@@ -535,6 +558,14 @@ again:
         s_heard = false;
         s_hls_last_format = 0;
         s_speaker_busy = false;
+        if (!wait_for_internet(gen)) {
+            if (s_want && s_gen == gen && !s_quit) {
+                ESP_LOGW(TAG, "no Internet for %u s: give up", static_cast<unsigned>(NET_WAIT_MS / 1000));
+                set_status(Status::FAILED);
+                s_want = false;
+            }
+            continue;
+        }
         set_status(failures ? Status::RETRYING : Status::CONNECTING);
         ESP_LOGI(TAG, "play %s", url.c_str());
         s_in_run = true;
@@ -550,6 +581,9 @@ again:
         close_codec();
         if (s_quit || !s_want || s_gen != gen) {
             continue;                       /* stopped, or another station */
+        }
+        if ((err != ESP_GMF_ERR_OK || !s_heard) && !phone_net_online()) {
+            continue;                       /* the network went away: wait for it above, not a failure */
         }
         if (err != ESP_GMF_ERR_OK || !s_heard) {
             failures = s_heard ? 0 : failures + 1;   /* a drop while playing is not a failure to connect */

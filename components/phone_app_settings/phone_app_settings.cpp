@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <vector>
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -542,7 +543,7 @@ void stop_auto_connect()
     }
     s_connect_requested = false;
     s_wifi_state = WIFI_IDLE;
-    phone_net_disconnect();
+    phone_net_pause_auto();     /* only the attempt: Wi-Fi stays on (phone_net_disconnect() is the switch) */
 }
 
 void refresh_wifi_status();
@@ -1251,11 +1252,12 @@ void build_speed_page(lv_obj_t *root)
 
 /* Mobile network page (Settings > Mobile network): 4G on/off and what the modem reports (stage 1 of
  * PLAN_4G.md: no data over 4G yet) */
-enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_DATA, CR_DATA_IP, CR_LINK, CR_APN, CR_IP, CR_ICCID, CR_IMSI, CR_IMEI, CR_MODEL,
-               CR_COUNT };
+enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_DATA, CR_DATA_IP, CR_LINK, CR_USAGE, CR_APN, CR_IP, CR_ICCID, CR_IMSI,
+               CR_IMEI, CR_MODEL, CR_COUNT };
 lv_obj_t *s_cellular_sw;
 lv_obj_t *s_cdata_sw;
 lv_obj_t *s_cellular_vals[CR_COUNT];
+lv_obj_t *s_cellular_hint;          /* what to do about a problem, under the status rows; hidden without one */
 
 void set_text_if_changed(lv_obj_t *label, const char *text)
 {
@@ -1298,6 +1300,67 @@ void cellular_refresh()
     set_text_if_changed(s_cellular_vals[CR_DATA], on ? phone_cell_data_text(ci.data) : phone_cell_data_text(PHONE_CELL_DATA_OFF));
     set_text_if_changed(s_cellular_vals[CR_DATA_IP], ci.data_ip[0] ? ci.data_ip : "--");
     set_text_if_changed(s_cellular_vals[CR_LINK], ci.link[0] ? ci.link : "--");
+    {
+        const char *hint = nullptr;
+        if (on) {
+            switch (ci.state) {
+            case PHONE_CELL_NO_ANSWER:
+                hint = T("Module 4G không trả lời. Module chạy bằng pin: hãy lắp pin, máy tự thử lại sau 1 phút.",
+                         "The 4G module does not answer. It runs from the battery: put the battery in, it tries again in a minute.");
+                break;
+            case PHONE_CELL_NO_SIM:
+                hint = T("Không thấy SIM. Tắt 4G, lắp lại SIM (đúng chiều) rồi bật lại.",
+                         "No SIM found. Turn 4G off, put the SIM back in (the right way round), then turn it on.");
+                break;
+            case PHONE_CELL_SIM_LOCKED:
+                hint = T("SIM đang khoá mã PIN. Gỡ mã PIN bằng một điện thoại khác rồi lắp lại.",
+                         "The SIM is locked with a PIN. Remove the PIN in another phone, then put it back.");
+                break;
+            case PHONE_CELL_DENIED:
+                hint = T("Nhà mạng từ chối SIM: SIM hết hạn, chưa kích hoạt hoặc không được chuyển vùng.",
+                         "The network refuses the SIM: expired, not activated, or no roaming.");
+                break;
+            case PHONE_CELL_REGISTERED:
+                if (phone_cell_data_enabled() && ci.data == PHONE_CELL_DATA_FAILED) {
+                    hint = T("Không nối được Internet qua 4G: kiểm tra gói cước dữ liệu và APN. Máy tự thử lại sau 20 giây.",
+                             "No Internet over 4G: check the data plan and the APN. It tries again in 20 s.");
+                }
+                break;
+            default:
+                break;
+            }
+        }
+        if (hint) {
+            set_text_if_changed(s_cellular_hint, hint);
+            lv_obj_remove_flag(s_cellular_hint, LV_OBJ_FLAG_HIDDEN);
+        } else if (!lv_obj_has_flag(s_cellular_hint, LV_OBJ_FLAG_HIDDEN)) {
+            lv_obj_add_flag(s_cellular_hint, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    {
+        unsigned long long rx, tx;
+        long long since;
+        phone_cell_data_usage(&rx, &tx, &since);
+        auto mb = [](unsigned long long b, char *out, size_t len) {
+            const unsigned long long k = b / 1024;
+            if (k < 1024) {
+                snprintf(out, len, "%llu KB", k);
+            } else {
+                snprintf(out, len, "%llu.%llu MB", k / 1024, k % 1024 * 10 / 1024);
+            }
+        };
+        char d[24], u[24], from[24] = "";
+        mb(rx, d, sizeof(d));
+        mb(tx, u, sizeof(u));
+        if (since > 0) {
+            const time_t t = static_cast<time_t>(since);
+            struct tm tmv;
+            localtime_r(&t, &tmv);
+            snprintf(from, sizeof(from), T("  từ %02d/%02d", "  since %02d/%02d"), tmv.tm_mday, tmv.tm_mon + 1);
+        }
+        snprintf(buf, sizeof(buf), LV_SYMBOL_DOWN " %s  " LV_SYMBOL_UP " %s%s", d, u, from);
+        set_text_if_changed(s_cellular_vals[CR_USAGE], buf);
+    }
     set_text_if_changed(s_cellular_vals[CR_STATE], phone_cell_state_text(on ? ci.state : PHONE_CELL_OFF));
     if (ci.oper[0]) {
         snprintf(buf, sizeof(buf), "%s%s", ci.oper, ci.roaming ? T(" (chuyển vùng)", " (roaming)") : "");
@@ -1344,7 +1407,7 @@ void build_cellular_page(lv_obj_t *root)
     } rows[] = {
         {CR_STATE, "Trạng thái", "Status"}, {CR_OPER, "Nhà mạng", "Operator"}, {CR_SIGNAL, "Sóng", "Signal"},
         {CR_NET, "Mạng", "Network"}, {CR_DATA, "Internet qua 4G", "Internet over 4G"}, {CR_DATA_IP, "IP (PPP)", "IP (PPP)"},
-        {CR_LINK, "Kênh UART", "UART link"}, {CR_APN, "APN", "APN"}, {CR_IP, "IP", "IP"}, {CR_ICCID, "ICCID", "ICCID"},
+        {CR_LINK, "Kênh UART", "UART link"}, {CR_USAGE, "Đã dùng", "Used"}, {CR_APN, "APN", "APN"}, {CR_IP, "IP", "IP"}, {CR_ICCID, "ICCID", "ICCID"},
         {CR_IMSI, "IMSI", "IMSI"}, {CR_IMEI, "IMEI", "IMEI"}, {CR_MODEL, "Module", "Module"},
     };
     const char *groups[] = {T("Trạng thái", "Status"), T("Dữ liệu (Wi-Fi được ưu tiên)", "Data (Wi-Fi comes first)"),
@@ -1358,6 +1421,17 @@ void build_cellular_page(lv_obj_t *root)
             lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
             lv_label_set_text(v, "--");
             s_cellular_vals[rows[r].row] = v;
+        }
+        if (first[gi] == CR_STATE) {
+            s_cellular_hint = make_text(g, "", 0xF2994A);
+            lv_obj_set_style_pad_all(s_cellular_hint, 12, 0);
+            lv_obj_add_flag(s_cellular_hint, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (first[gi] == CR_DATA) {
+            grouped_row(g, T(LV_SYMBOL_REFRESH "  Đặt lại bộ đếm", LV_SYMBOL_REFRESH "  Reset the counter"), [](lv_event_t *) {
+                phone_cell_data_usage_reset();
+                cellular_refresh();
+            }, nullptr);
         }
         group_end(g);
     }
@@ -1501,6 +1575,26 @@ void on_timer(lv_timer_t *t)
         scan_spin_stop();
         if (s_cur_page == PAGE_WIFI) {
             refresh_wifi_list();
+        }
+        if (!s_connect_requested && phone_net_is_enabled()) {
+            phone_net_enable();     /* the scan paused auto reconnect: resume it (no-op when connected) */
+        }
+    }
+    /* the switch follows quick settings */
+    if (s_wifi_sw && lv_obj_has_state(s_wifi_sw, LV_STATE_CHECKED) != phone_net_is_enabled()) {
+        s_wifi_on = phone_net_is_enabled();
+        if (s_wifi_on) {
+            lv_obj_add_state(s_wifi_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_remove_state(s_wifi_sw, LV_STATE_CHECKED);
+            set_list_empty(true);
+        }
+        if (s_wifi_body) {
+            if (s_wifi_on) {
+                lv_obj_remove_flag(s_wifi_body, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_wifi_body, LV_OBJ_FLAG_HIDDEN);
+            }
         }
     }
     if (s_cur_page == PAGE_WIFI) {

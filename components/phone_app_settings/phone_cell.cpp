@@ -10,6 +10,8 @@
 #include "esp_modem_api.h"
 #include "esp_netif.h"
 #include "esp_netif_ppp.h"
+#include "nvs.h"
+#include <ctime>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -51,6 +53,18 @@ int s_baud = BAUD_BOOT;
 std::atomic<bool> s_ppp_up;
 std::atomic<bool> s_ppp_lost;
 int64_t s_data_retry_at;
+/* data counter: the wrappers add to the pending counts, the cell task moves them to the totals and saves */
+std::atomic<uint32_t> s_rx_pending;
+std::atomic<uint32_t> s_tx_pending;
+uint64_t s_rx_total;                            // under s_lock
+uint64_t s_tx_total;
+int64_t s_usage_since;
+uint64_t s_usage_saved;                         // rx + tx at the last NVS write
+constexpr uint64_t USAGE_SAVE_STEP = 1024 * 1024;   // write NVS every MB, and when data goes down
+struct UsageBlob {
+    uint64_t rx, tx;
+    int64_t since;
+};
 int s_wifi_seen = -1;                           // last sampled Wi-Fi state (-1: not yet)
 int64_t s_wifi_since;                           // when it last changed
 
@@ -220,9 +234,15 @@ void on_ip_event(void *, esp_event_base_t, int32_t id, void *data)
         set_data(PHONE_CELL_DATA_UP, ip);
         s_ppp_up = true;
     } else if (id == IP_EVENT_PPP_LOST_IP) {
-        ESP_LOGW(TAG, "PPP lost its address");
-        s_ppp_up = false;
-        s_ppp_lost = true;
+        /* the event of a closed session can come up to ~30 s late, while the next one is being dialled: it must not
+         * tear that one down. Only a session that is up can lose its address. */
+        if (s_ppp_up) {
+            ESP_LOGW(TAG, "PPP lost its address");
+            s_ppp_up = false;
+            s_ppp_lost = true;
+        } else {
+            ESP_LOGI(TAG, "PPP lost-address event of a closed session: ignored");
+        }
     }
     if (s_task) {
         xTaskNotifyGive(s_task);
@@ -310,8 +330,11 @@ bool power_on()
     return true;
 }
 
+void usage_fold(bool force);
+
 void data_down()
 {
+    usage_fold(true);
     if (s_dce && s_mode != ESP_MODEM_MODE_COMMAND) {
         if (esp_modem_set_mode(s_dce, ESP_MODEM_MODE_COMMAND) != ESP_OK) {
             ESP_LOGW(TAG, "back to command mode failed");
@@ -556,6 +579,45 @@ void poll_network()
     xSemaphoreGive(s_lock);
 }
 
+void usage_load()
+{
+    nvs_handle_t h;
+    UsageBlob b = {};
+    size_t len = sizeof(b);
+    if (nvs_open("phone", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_blob(h, "cusage", &b, &len) != ESP_OK || len != sizeof(b)) {
+            b = {};
+        }
+        nvs_close(h);
+    }
+    s_rx_total = b.rx;
+    s_tx_total = b.tx;
+    s_usage_since = b.since;
+    s_usage_saved = b.rx + b.tx;
+}
+
+/* Fold the pending counts into the totals; writes NVS every USAGE_SAVE_STEP, or now when `force` */
+void usage_fold(bool force)
+{
+    const uint32_t rx = s_rx_pending.exchange(0);
+    const uint32_t tx = s_tx_pending.exchange(0);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_rx_total += rx;
+    s_tx_total += tx;
+    const UsageBlob b = {s_rx_total, s_tx_total, s_usage_since};
+    const bool save = b.rx + b.tx - s_usage_saved >= USAGE_SAVE_STEP || (force && b.rx + b.tx != s_usage_saved);
+    if (save) {
+        s_usage_saved = b.rx + b.tx;
+    }
+    xSemaphoreGive(s_lock);
+    nvs_handle_t h;
+    if (save && nvs_open("phone", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_blob(h, "cusage", &b, sizeof(b));
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
 /* Wi-Fi first: does mobile data need to carry the traffic now? `wait_ms` shrinks to the next decision */
 bool need_ppp(uint32_t *wait_ms)
 {
@@ -651,6 +713,7 @@ void cell_task(void *)
         if (s_want_data && s_info.state != PHONE_CELL_REGISTERED && s_mode == ESP_MODEM_MODE_COMMAND) {
             set_data(PHONE_CELL_DATA_WAITING);
         }
+        usage_fold(false);
         if (route_wait < wait) {
             wait = route_wait;                      /* the Wi-Fi delay ends before the next poll */
         }
@@ -667,6 +730,7 @@ extern "C" void phone_cell_start(void)
         return;
     }
     s_lock = xSemaphoreCreateMutex();
+    usage_load();
     s_want = phone_pref_get("cell", 0) != 0;
     s_want_data = phone_pref_get("cdata", 0) != 0;
     /* esp_modem and lwIP PPP: internal stack (the UART driver, no flash access) */
@@ -756,8 +820,60 @@ extern "C" const char *phone_cell_data_text(phone_cell_data_t data)
     case PHONE_CELL_DATA_WAITING: return T("Chờ mạng…", "Waiting for the network…");
     case PHONE_CELL_DATA_CONNECTING: return T("Đang nối…", "Connecting…");
     case PHONE_CELL_DATA_UP: return T("Đã nối", "Connected");
-    case PHONE_CELL_DATA_FAILED: return T("Lỗi, sẽ thử lại", "Failed, trying again");
+    case PHONE_CELL_DATA_FAILED: return T("Không nối được, thử lại", "Failed, retrying");
     case PHONE_CELL_DATA_STANDBY: return T("Dự phòng (Wi-Fi)", "Standby (Wi-Fi)");
     }
     return "";
+}
+
+extern "C" void phone_cell_data_usage(unsigned long long *rx, unsigned long long *tx, long long *since)
+{
+    if (!s_lock) {
+        *rx = *tx = 0;
+        *since = 0;
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    *rx = s_rx_total + s_rx_pending;
+    *tx = s_tx_total + s_tx_pending;
+    *since = s_usage_since;
+    xSemaphoreGive(s_lock);
+}
+
+extern "C" void phone_cell_data_usage_reset(void)
+{
+    if (!s_lock) {
+        return;
+    }
+    const time_t now = time(nullptr);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_rx_pending = 0;
+    s_tx_pending = 0;
+    s_rx_total = 0;
+    s_tx_total = 0;
+    s_usage_since = now > 1700000000 ? static_cast<int64_t>(now) : 0;   /* only a set clock */
+    s_usage_saved = 1;                          /* differs from 0: the next fold writes NVS */
+    xSemaphoreGive(s_lock);
+    usage_fold(true);
+}
+
+/* The PPP netif sends through esp_netif_transmit() and receives through esp_netif_receive() (linker --wrap in
+ * CMakeLists.txt): count the 4G bytes there, the other interfaces pass through untouched */
+extern "C" esp_err_t __real_esp_netif_transmit(esp_netif_t *esp_netif, void *data, size_t len);
+extern "C" esp_err_t __real_esp_netif_receive(esp_netif_t *esp_netif, void *buffer, size_t len, void *eb);
+
+extern "C" esp_err_t __wrap_esp_netif_transmit(esp_netif_t *esp_netif, void *data, size_t len)
+{
+    if (esp_netif && esp_netif == s_ppp) {
+        s_tx_pending += len;
+    }
+    return __real_esp_netif_transmit(esp_netif, data, len);
+}
+
+extern "C" esp_err_t __wrap_esp_netif_receive(esp_netif_t *esp_netif, void *buffer, size_t len, void *eb)
+{
+    if (esp_netif && esp_netif == s_ppp) {
+        s_rx_pending += len;
+    }
+    return __real_esp_netif_receive(esp_netif, buffer, len, eb);
 }
