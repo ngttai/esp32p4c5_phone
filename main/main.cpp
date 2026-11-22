@@ -20,6 +20,7 @@
 #include "phone_cell.h"
 #include "phone_boot_splash.h"
 #include "nvs_flash.h"
+#include "hal/cache_ll.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
 #   undef ESP_UTILS_LOG_TAG
@@ -38,6 +39,16 @@ using namespace esp_brookesia::gui;
 using namespace esp_brookesia::systems::phone;
 
 constexpr bool EXAMPLE_SHOW_MEM_INFO = false;
+
+/* ESP32-P4 hardware issue (esp-idf#19369, confirmed by Espressif): IDF v6.1's cache_hal_init() sets the L1 D-cache
+ * arbitration to random (l1_dcache_undef_op = 2), which can livelock when one core spins on a cached address while
+ * the other misses. At boot CPU1 spins waiting for the scheduler while CPU0 fills the IDLE stacks: "Store access
+ * fault" in ROM memset (prvInitialiseNewTask), depending on the memory layout. Round-robin (0) for the L1 D-cache
+ * only, as Espressif advises (L1 I-cache and L2 stay on 2). Runs after cache_hal_init(), before the scheduler. */
+__attribute__((constructor(101))) static void l1_dcache_round_robin(void)
+{
+    cache_ll_preload_set_strategy(1, CACHE_TYPE_DATA, CACHE_LL_ID_ALL, CACHE_LL_PRELOAD_UNTIL_FETCH_DONE);
+}
 
 extern "C" void app_main(void)
 {
