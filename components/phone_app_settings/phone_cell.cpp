@@ -105,7 +105,8 @@ void set_data(phone_cell_data_t d, const char *ip = nullptr)
 /* An AT command in command or CMUX mode; the answer as esp_modem returns it (lines without the OK) */
 bool at(const char *cmd, char *resp, size_t len, uint32_t timeout_ms = 2000)
 {
-    char out[CONFIG_ESP_MODEM_C_API_STR_MAX + 1] = "";
+    static char out[CONFIG_ESP_MODEM_C_API_STR_MAX + 1];   // only the phone_cell task talks AT
+    out[0] = '\0';
     resp[0] = '\0';
     if (!s_dce || s_mode == ESP_MODEM_MODE_DATA) {
         return false;           /* the UART carries PPP only */
@@ -441,6 +442,61 @@ bool poll_sim()
     return true;
 }
 
+/* The address of AT+CGCONTRDP (3GPP 27.007): dot-separated numbers, 4 (IPv4), 8 (IPv4 + mask), 16 (IPv6) or 32
+ * (IPv6 + mask). An IPV4V6 context gives one line per family: the IPv4 one is shown, else the IPv6 one in hex. */
+bool contrdp_ip(const char *resp, char *apn, size_t apn_len, char *out, size_t len)
+{
+    bool v6 = false;
+    out[0] = '\0';
+    for (const char *p = strstr(resp, "+CGCONTRDP:"); p; p = strstr(p + 1, "+CGCONTRDP:")) {
+        char line[320], addr[200];
+        field(p, "+CGCONTRDP:", line, sizeof(line));
+        if (!apn[0]) {
+            item(line, 2, apn, apn_len);
+        }
+        item(line, 3, addr, sizeof(addr));
+        int b[32], n = 0;
+        for (const char *q = addr; *q && n < 32;) {
+            b[n++] = atoi(q);
+            q = strchr(q, '.');
+            q = q ? q + 1 : "";
+        }
+        if (n == 4 || n == 8) {
+            snprintf(out, len, "%d.%d.%d.%d", b[0], b[1], b[2], b[3]);
+            return true;
+        }
+        if ((n == 16 || n == 32) && !v6) {
+            uint16_t g[8];
+            for (int i = 0; i < 8; i++) {
+                g[i] = static_cast<uint16_t>((b[2 * i] << 8) | b[2 * i + 1]);
+            }
+            int zs = -1, zl = 0;                    /* the longest run of zero groups becomes "::" */
+            for (int i = 0; i < 8;) {
+                int j = i;
+                while (j < 8 && g[j] == 0) {
+                    j++;
+                }
+                if (j - i > zl && j - i >= 2) {
+                    zs = i;
+                    zl = j - i;
+                }
+                i = j > i ? j : i + 1;
+            }
+            size_t o = 0;
+            for (int i = 0; i < 8 && o < len; i++) {
+                if (i == zs) {
+                    o += snprintf(out + o, len - o, "::");
+                    i += zl - 1;
+                    continue;
+                }
+                o += snprintf(out + o, len - o, "%s%x", (i && i != zs + zl) ? ":" : "", g[i]);
+            }
+            v6 = true;
+        }
+    }
+    return v6;
+}
+
 void poll_network()
 {
     char resp[256], line[160], v[64];
@@ -476,9 +532,9 @@ void poll_network()
             item(line, 3, v, sizeof(v));
             strlcpy(act, v[0] ? act_name(atoi(v)) : "", sizeof(act));
         }
-        if (at("AT+CGCONTRDP", resp, sizeof(resp), 5000) && field(resp, "+CGCONTRDP:", line, sizeof(line))) {
-            item(line, 2, apn, sizeof(apn));
-            item(line, 3, ip, sizeof(ip));
+        static char ctx[768];                       /* IPV4V6: two lines with IPv6 addresses, masks and DNS */
+        if (at("AT+CGCONTRDP", ctx, sizeof(ctx), 5000)) {
+            contrdp_ip(ctx, apn, sizeof(apn), ip, sizeof(ip));
         }
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);

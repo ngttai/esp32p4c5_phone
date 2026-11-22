@@ -130,5 +130,7 @@ CONFIG_SR_WN_WN9_HIESP=y
 
 # 4G data (PLAN_4G.md stage 2): PPP over the ML307C UART through esp_modem
 CONFIG_LWIP_PPP_SUPPORT=y
+# 4G: AT+CGCONTRDP of an IPV4V6 context is two long lines (IPv6 address, mask, DNS)
+CONFIG_ESP_MODEM_C_API_STR_MAX=1024
 # 4G: DNS follows the default netif (else the carrier DNS stays after PPP and fails over Wi-Fi)
 CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
