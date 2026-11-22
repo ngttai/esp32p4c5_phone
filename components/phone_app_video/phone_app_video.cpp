@@ -1585,6 +1585,12 @@ void free_out()
 
 } // namespace
 
+/* The player task, for phone_video_h264mem.cpp */
+extern "C" TaskHandle_t phone_video_task(void)
+{
+    return s_task;
+}
+
 namespace esp_brookesia::apps {
 
 PhoneVideo *PhoneVideo::requestInstance()
