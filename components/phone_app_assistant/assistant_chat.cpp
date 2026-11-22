@@ -14,13 +14,17 @@
  * The microphone and the speaker share the I2S clock, so both run at 16 kHz; the Opus decoder
  * resamples the answer, whatever rate the server encodes it at.
  */
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include "decoder/impl/esp_opus_dec.h"
 #include "encoder/impl/esp_opus_enc.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_log.h"
+#include "assistant_afe.h"
 #include "assistant_mcp.h"
 #include "assistant_wake.h"
 #include "esp_mcp_engine.h"
@@ -83,6 +87,10 @@ bool s_goodbye;                             // the server ended the conversation
 bool s_connected;                           // link to the server, as last reported
 bool s_wake;                                // the wake word model is loaded; the idle microphone listens for it
 int16_t *s_wake_buf;
+bool s_afe_on;                              // saying the wake word over the answer interrupts it (esp-sr front-end)
+int16_t *s_ref_buf;                         // what the speaker played during the last microphone frame
+int16_t *s_acc_mic, *s_acc_ref;             // microphone and reference waiting for a full front-end chunk
+int s_acc_n;
 void *s_enc;
 int s_enc_in, s_enc_out;
 uint8_t *s_enc_buf;
@@ -200,6 +208,72 @@ void on_link_event(void *, esp_event_base_t, int32_t id, void *)
 
 /* ---- play task ---- */
 
+/* ---- software echo reference (stage 3b) ----
+ * What the speaker plays is kept on the microphone's own clock: the ring holds, at index t, the sample that was
+ * handed to the speaker when t microphone samples had been read. The echo in the microphone lags that by a
+ * constant delay (output buffers, air, input buffers): 187-192 samples measured in stage 3b (pref "aecd"). */
+
+constexpr int REF_RING = 16384;             // samples, a power of two
+constexpr int REF_MASK = REF_RING - 1;
+constexpr int REF_DELAY_DEFAULT = 187;
+int16_t *s_ref_ring;                        // PSRAM
+portMUX_TYPE s_ref_mux = portMUX_INITIALIZER_UNLOCKED;
+int64_t s_mic_idx;                          // microphone samples read so far
+int64_t s_mic_us;                           // esp_timer time when s_mic_idx last advanced
+int64_t s_play_end;                         // timeline index where what was handed to the speaker ends
+int s_ref_delay = REF_DELAY_DEFAULT;
+
+/* caller holds s_ref_mux */
+int64_t mic_now_locked()
+{
+    int64_t t = (esp_timer_get_time() - s_mic_us) * RATE / 1000000;
+    t = t < 0 ? 0 : (t > RATE / 20 ? RATE / 20 : t);
+    return s_mic_idx + t;
+}
+
+void ref_reset()
+{
+    taskENTER_CRITICAL(&s_ref_mux);
+    if (s_ref_ring) {
+        memset(s_ref_ring, 0, REF_RING * sizeof(int16_t));
+    }
+    s_mic_idx = 0;
+    s_mic_us = esp_timer_get_time();
+    s_play_end = 0;
+    taskEXIT_CRITICAL(&s_ref_mux);
+}
+
+/* The speaker is about to play n samples */
+void ref_put(const int16_t *pcm, int n)
+{
+    taskENTER_CRITICAL(&s_ref_mux);
+    if (s_ref_ring) {
+        int64_t start = mic_now_locked();
+        start = s_play_end > start ? s_play_end : start;
+        for (int k = 0; k < n; k++) {
+            s_ref_ring[(start + k) & REF_MASK] = pcm[k];
+        }
+        s_play_end = start + n;
+    }
+    taskEXIT_CRITICAL(&s_ref_mux);
+}
+
+/* n microphone samples were read: the matching playback comes out, then the clock advances */
+void ref_take(int16_t *out, int n)
+{
+    taskENTER_CRITICAL(&s_ref_mux);
+    for (int i = 0; i < n; i++) {
+        const int64_t t = s_mic_idx + i - s_ref_delay;
+        out[i] = s_ref_ring ? s_ref_ring[t & REF_MASK] : 0;
+        if (s_ref_ring) {
+            s_ref_ring[(t - REF_RING / 2) & REF_MASK] = 0;       // keep the old half of the ring clean
+        }
+    }
+    s_mic_idx += n;
+    s_mic_us = esp_timer_get_time();
+    taskEXIT_CRITICAL(&s_ref_mux);
+}
+
 void play_task(void *)
 {
     esp_opus_dec_cfg_t cfg = {};
@@ -235,6 +309,7 @@ void play_task(void *)
                         volume = v;
                         esp_codec_dev_set_out_vol(s_spk, v);
                     }
+                    ref_put(reinterpret_cast<const int16_t *>(pcm), out.decoded_size / sizeof(int16_t));
                     esp_codec_dev_write(s_spk, pcm, out.decoded_size);
                 } else {
                     volume = -1;
@@ -344,6 +419,8 @@ void on_button()
             return;
         }
         s_talking = true;
+        ref_reset();
+        s_acc_n = 0;
         s_state = ASSISTANT_CHAT_OPENING;
         esp_xiaozhi_chat_audio_t audio = {};
         audio.format = "opus";
@@ -375,11 +452,40 @@ void on_button()
     }
 }
 
+/* While the answer plays: microphone and reference go to the front-end in its own chunk size; the wake word
+ * heard over the answer cuts it, as a tap on the button does */
+void barge_in_feed()
+{
+    s_mic_level = 0;
+    const int chunk = assistant_afe_chunk();
+    int i = 0;
+    while (i < FRAME_SAMPLES) {
+        const int n = std::min(chunk - s_acc_n, FRAME_SAMPLES - i);
+        memcpy(s_acc_mic + s_acc_n, s_mic_buf + i, n * sizeof(int16_t));
+        memcpy(s_acc_ref + s_acc_n, s_ref_buf + i, n * sizeof(int16_t));
+        s_acc_n += n;
+        i += n;
+        if (s_acc_n == chunk) {
+            assistant_afe_feed(s_acc_mic, s_acc_ref);
+            s_acc_n = 0;
+        }
+    }
+    if (assistant_afe_woke()) {
+        ESP_LOGI(TAG, "wake word over the answer: barge in");
+        on_button();
+    }
+}
+
 /* One microphone frame: sent while listening, dropped otherwise (the clock keeps running) */
 void pump_microphone()
 {
     if (esp_codec_dev_read(s_mic, s_mic_buf, FRAME_SAMPLES * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
         vTaskDelay(pdMS_TO_TICKS(20));
+        return;
+    }
+    ref_take(s_ref_buf, FRAME_SAMPLES);
+    if (s_afe_on && s_state == ASSISTANT_CHAT_SPEAKING) {
+        barge_in_feed();
         return;
     }
     if (s_state != ASSISTANT_CHAT_LISTENING || !s_enc) {
@@ -516,6 +622,25 @@ void session_task(void *)
         s_wake_buf = static_cast<int16_t *>(malloc(assistant_wake_chunk() * sizeof(int16_t)));
         s_wake = s_wake_buf != nullptr;
     }
+    s_ref_delay = phone_pref_get("aecd", REF_DELAY_DEFAULT);
+    if (s_wake && phone_pref_get("barge", 1)) {
+        /* the I2S channels first (stage 3b: created after the front-end, they found no DMA memory) */
+        s_ref_ring = static_cast<int16_t *>(heap_caps_calloc(REF_RING, sizeof(int16_t), MALLOC_CAP_SPIRAM));
+        s_ref_buf = static_cast<int16_t *>(heap_caps_malloc(FRAME_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+        s_afe_on = s_ref_ring && s_ref_buf && open_codecs();
+        close_codecs();
+        s_afe_on = s_afe_on && assistant_afe_open();
+        if (s_afe_on) {
+            const int chunk = assistant_afe_chunk();
+            s_acc_mic = static_cast<int16_t *>(heap_caps_malloc(chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+            s_acc_ref = static_cast<int16_t *>(heap_caps_malloc(chunk * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+            s_afe_on = s_acc_mic && s_acc_ref;
+        }
+        ESP_LOGI(TAG, "barge-in with the wake word: %s (echo delay %d samples)", s_afe_on ? "on" : "off", s_ref_delay);
+    }
+    if (!s_ref_buf) {
+        s_ref_buf = static_cast<int16_t *>(heap_caps_malloc(FRAME_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    }
 
     bool run = true;
     while (run) {
@@ -574,6 +699,10 @@ void session_task(void *)
                 break;
             case CMD_TTS_START:
                 if (s_talking) {
+                    if (s_afe_on && s_state != ASSISTANT_CHAT_SPEAKING) {
+                        assistant_afe_reset();
+                        s_acc_n = 0;
+                    }
                     s_answer_done = false;
                     s_state = ASSISTANT_CHAT_SPEAKING;
                 }
@@ -631,6 +760,17 @@ void session_task(void *)
     }
     free(s_enc_buf);
     wake_mic_close();
+    assistant_afe_close();
+    s_afe_on = false;
+    heap_caps_free(s_acc_mic);
+    heap_caps_free(s_acc_ref);
+    heap_caps_free(s_ref_buf);
+    s_acc_mic = s_acc_ref = s_ref_buf = nullptr;
+    taskENTER_CRITICAL(&s_ref_mux);
+    int16_t *ring = s_ref_ring;
+    s_ref_ring = nullptr;
+    taskEXIT_CRITICAL(&s_ref_mux);
+    heap_caps_free(ring);
     if (s_wake || s_wake_buf) {
         assistant_wake_close();
         free(s_wake_buf);

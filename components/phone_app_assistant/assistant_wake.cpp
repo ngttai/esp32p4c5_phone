@@ -111,6 +111,11 @@ extern "C" int assistant_wake_chunk(void)
     return s_chunk;
 }
 
+extern "C" srmodel_list_t *assistant_wake_models(void)
+{
+    return s_data ? s_models : nullptr;
+}
+
 extern "C" bool assistant_wake_feed(const int16_t *pcm)
 {
     if (!s_data) {

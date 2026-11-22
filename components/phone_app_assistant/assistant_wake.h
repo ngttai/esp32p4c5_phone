@@ -6,6 +6,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "model_path.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,6 +17,8 @@ bool assistant_wake_open(void);
 void assistant_wake_close(void);
 /** Number of 16-bit samples one assistant_wake_feed() call takes (0 when closed). */
 int assistant_wake_chunk(void);
+/** The loaded model list (shared with assistant_afe), NULL when closed. */
+srmodel_list_t *assistant_wake_models(void);
 /** Feed one chunk; true when the wake word was heard. */
 bool assistant_wake_feed(const int16_t *pcm);
 
