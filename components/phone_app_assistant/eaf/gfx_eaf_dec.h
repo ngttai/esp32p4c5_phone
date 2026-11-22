@@ -303,6 +303,9 @@ esp_err_t eaf_dec_decode_frame(eaf_dec_handle_t handle, int frame_index,
                                uint8_t *out_data, size_t out_size,
                                bool swap_bytes);
 
+/** phone: the RGB565 color that transparent pixels are decoded to (the background behind the animation). */
+void eaf_dec_set_transparent_color(uint16_t color);
+
 #ifdef __cplusplus
 }
 #endif

@@ -47,6 +47,12 @@
 
 static const char *TAG = "eaf_dec";
 static eaf_dec_block_decoder_cb_t s_eaf_decoders[EAF_DEC_ENCODING_MAX] = {0};
+static uint16_t s_transparent;      /* phone: what transparent pixels become (the background) */
+
+void eaf_dec_set_transparent_color(uint16_t color)
+{
+    s_transparent = color;
+}
 
 /**********************
  *  STATIC PROTOTYPES
@@ -903,6 +909,9 @@ esp_err_t eaf_dec_decode_frame(eaf_dec_handle_t handle, int frame_index,
         return ESP_ERR_NO_MEM;
     }
 
+    /* phone: a transparent palette entry shows the background (esp_emote_gfx clears the screen with the background
+     * color, then draws the animation over it, skipping transparent pixels) */
+    const uint32_t TRANSPARENT = 0xFFFFFFFE;
     uint32_t palette_cache[256];
     memset(palette_cache, 0xFF, sizeof(palette_cache));
 
@@ -929,20 +938,30 @@ esp_err_t eaf_dec_decode_frame(eaf_dec_handle_t handle, int frame_index,
         if (bit_depth == EAF_COLOR_DEPTH_8BIT) {
             for (size_t i = 0; i < valid_size; i++) {
                 uint8_t index = tmp_data[i];
-                uint16_t color;
-
                 if (palette_cache[index] == 0xFFFFFFFF) {
                     gfx_color_t eaf_color;
-                    eaf_dec_get_palette_color(&header, index, swap_bytes, &eaf_color);
-                    palette_cache[index] = eaf_color.full;
-                    color = eaf_color.full;
-                } else {
-                    color = palette_cache[index];
+                    palette_cache[index] = eaf_dec_get_palette_color(&header, index, swap_bytes, &eaf_color)
+                                           ? TRANSPARENT : eaf_color.full;
                 }
-                block_buffer[i] = color;
+                block_buffer[i] = palette_cache[index] != TRANSPARENT ? (uint16_t)palette_cache[index] : s_transparent;
             }
         } else if (bit_depth == EAF_COLOR_DEPTH_4BIT) {
-            GFX_LOGW(TAG, "%d-bit depth not supported", EAF_COLOR_DEPTH_4BIT);
+            /* phone: two pixels a byte, high nibble first, each row starts on a byte (Emote Pack eaf_360x360) */
+            const size_t stride = (width + 1) / 2;
+            const size_t rows = valid_size / width;
+            for (size_t y = 0; y < rows; y++) {
+                const uint8_t *row = tmp_data + y * stride;
+                for (size_t x = 0; x < width; x++) {
+                    const uint8_t index = (x & 1) ? (row[x / 2] & 0x0F) : (row[x / 2] >> 4);
+                    if (palette_cache[index] == 0xFFFFFFFF) {
+                        gfx_color_t eaf_color;
+                        palette_cache[index] = eaf_dec_get_palette_color(&header, index, swap_bytes, &eaf_color)
+                                               ? TRANSPARENT : eaf_color.full;
+                    }
+                    block_buffer[y * width + x] = palette_cache[index] != TRANSPARENT ? (uint16_t)palette_cache[index]
+                                                  : s_transparent;
+                }
+            }
         } else if (bit_depth == EAF_COLOR_DEPTH_24BIT) {
             memcpy(block_buffer, tmp_data, valid_size);
         }
