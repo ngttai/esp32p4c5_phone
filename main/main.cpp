@@ -29,6 +29,7 @@
 
 using namespace esp_brookesia;
 
+constexpr int WIFI_ICON_SEARCHING = 4;  // added to the stock Wi-Fi icon: off 0, levels 1..3, searching 4
 constexpr int CELL_ICON_ID = 1000;      // 4G signal on the status bar
 constexpr int CELL_DATA_ICON_ID = 1001; // "4G" left of it while mobile data carries the traffic
 extern "C" const lv_image_dsc_t phone_cell_nosim, phone_cell_bars0, phone_cell_bars1, phone_cell_bars2,
@@ -100,6 +101,13 @@ extern "C" void app_main(void)
             if (text.default_fonts[i].size_px >= 12 && text.default_fonts[i].size_px <= 28) {
                 text.default_fonts[i].font_resource = phone_font_by_size(text.default_fonts[i].size_px);
             }
+        }
+        /* Wi-Fi icon: a 5th image, the full fan in the grey of the unlit 4G bars (white at 0x50 over the 0x38393A bar), for "on but not connected"
+         * (connecting, or no saved network in range); "off" keeps the stock crossed icon */
+        auto &wifi_icon = stylesheet->display.status_bar.data.wifi.icon_data.icon;
+        if (wifi_icon.image_num == 4) {
+            wifi_icon.images[WIFI_ICON_SEARCHING] = gui::StyleImage::IMAGE_RECOLOR(wifi_icon.images[3].resource, 0x767778);
+            wifi_icon.image_num = 5;
         }
         ESP_UTILS_LOGI("Using stylesheet (%s)", stylesheet->core.name);
         ESP_UTILS_CHECK_FALSE_EXIT(phone->addStylesheet(stylesheet), "Add stylesheet failed");
@@ -198,6 +206,8 @@ extern "C" void app_main(void)
             int wifi = 0;
             if (st.wifi_connected) {
                 wifi = st.rssi >= -60 ? 3 : (st.rssi >= -72 ? 2 : 1);
+            } else if (phone_net_is_enabled()) {
+                wifi = WIFI_ICON_SEARCHING;
             }
             if (wifi != s_wifi) {
                 s_wifi = wifi;
