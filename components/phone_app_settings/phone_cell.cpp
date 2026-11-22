@@ -16,6 +16,7 @@
 #include "sdkconfig.h"
 #include "bsp/esp-bsp.h"
 #include "phone_locale.h"
+#include "phone_net.h"
 
 #define TAG "CELL"
 #define T(vi, en) phone_tr(vi, en)
@@ -28,6 +29,8 @@ constexpr uint32_t RETRY_NO_ANSWER_MS = 60000;  // power again after a module th
 constexpr uint32_t BOOT_MS = 15000;             // first "AT" answer after power-on (4.7 s measured)
 constexpr uint32_t DATA_RETRY_MS = 20000;       // after a PPP that did not come up
 constexpr uint32_t PPP_UP_MS = 30000;           // IP from PPP after the dial
+constexpr uint32_t WIFI_LOST_MS = 15000;        // Wi-Fi down this long (a reason-7 drop is back in a few s) -> 4G
+constexpr uint32_t WIFI_BACK_MS = 30000;        // Wi-Fi back this long -> 4G to standby
 constexpr int BAUD_BOOT = 115200;
 constexpr int BAUD_FAST = 921600;               // stage 0: 300/300 "AT" through the level shifter
 
@@ -48,6 +51,8 @@ int s_baud = BAUD_BOOT;
 std::atomic<bool> s_ppp_up;
 std::atomic<bool> s_ppp_lost;
 int64_t s_data_retry_at;
+int s_wifi_seen = -1;                           // last sampled Wi-Fi state (-1: not yet)
+int64_t s_wifi_since;                           // when it last changed
 
 const uart_port_t PORT = static_cast<uart_port_t>(CONFIG_BSP_MODEM_UART_NUM);
 
@@ -495,6 +500,45 @@ void poll_network()
     xSemaphoreGive(s_lock);
 }
 
+/* Wi-Fi first: does mobile data need to carry the traffic now? `wait_ms` shrinks to the next decision */
+bool need_ppp(uint32_t *wait_ms)
+{
+    phone_net_status_t net = {};
+    phone_net_get_status(&net);
+    const int64_t now = esp_timer_get_time();
+    const int up = net.wifi_connected ? 1 : 0;
+    if (up != s_wifi_seen) {
+        s_wifi_seen = up;
+        s_wifi_since = now;
+    }
+    if (!up && !phone_net_is_enabled()) {
+        return true;                                /* turned off by the user: no wait */
+    }
+    const bool ppp = s_mode != ESP_MODEM_MODE_COMMAND;
+    const uint32_t delay = up ? WIFI_BACK_MS : WIFI_LOST_MS;
+    const int64_t left_us = s_wifi_since + static_cast<int64_t>(delay) * 1000 - now;
+    if (up ? !ppp : ppp) {
+        return ppp;                                 /* already where it should be */
+    }
+    if (left_us > 0) {
+        const uint32_t left = static_cast<uint32_t>(left_us / 1000) + 50;
+        if (left < *wait_ms) {
+            *wait_ms = left;
+        }
+        return ppp;                                 /* not long enough: keep as it is */
+    }
+    static int64_t logged_since = -1;
+    if (logged_since != s_wifi_since) {
+        logged_since = s_wifi_since;
+        if (up) {
+            ESP_LOGI(TAG, "Wi-Fi back for %u s: mobile data to standby", static_cast<unsigned>(delay / 1000));
+        } else {
+            ESP_LOGI(TAG, "Wi-Fi lost for %u s: mobile data takes over", static_cast<unsigned>(delay / 1000));
+        }
+    }
+    return !up;
+}
+
 void cell_task(void *)
 {
     for (;;) {
@@ -516,12 +560,19 @@ void cell_task(void *)
             read_identity();
         }
 
-        /* mobile data: down when turned off or lost, up when on and registered */
-        if (s_mode != ESP_MODEM_MODE_COMMAND && (!s_want_data || s_ppp_lost)) {
+        /* mobile data: down when turned off, lost, or Wi-Fi is back; up when on, registered and Wi-Fi is gone */
+        uint32_t route_wait = POLL_MS;
+        const bool need = s_want_data && need_ppp(&route_wait);
+        if (s_mode != ESP_MODEM_MODE_COMMAND && (!s_want_data || s_ppp_lost || !need)) {
+            const bool lost = s_ppp_lost;
             data_down();
-            set_data(s_want_data ? PHONE_CELL_DATA_FAILED : PHONE_CELL_DATA_OFF);
-            if (s_want_data) {
+            if (!s_want_data) {
+                set_data(PHONE_CELL_DATA_OFF);
+            } else if (lost) {
+                set_data(PHONE_CELL_DATA_FAILED);
                 s_data_retry_at = esp_timer_get_time() + static_cast<int64_t>(DATA_RETRY_MS) * 1000;
+            } else {
+                set_data(PHONE_CELL_DATA_STANDBY);
             }
         }
 
@@ -532,15 +583,20 @@ void cell_task(void *)
             poll_network();
             if (s_info.state == PHONE_CELL_REGISTERED) {
                 wait = POLL_MS;
-                if (s_want_data && s_mode == ESP_MODEM_MODE_COMMAND && esp_timer_get_time() >= s_data_retry_at) {
+                if (need && s_mode == ESP_MODEM_MODE_COMMAND && esp_timer_get_time() >= s_data_retry_at) {
                     data_up();
                 } else if (!s_want_data) {
                     set_data(PHONE_CELL_DATA_OFF);
+                } else if (!need && s_mode == ESP_MODEM_MODE_COMMAND) {
+                    set_data(PHONE_CELL_DATA_STANDBY);
                 }
             }
         }
         if (s_want_data && s_info.state != PHONE_CELL_REGISTERED && s_mode == ESP_MODEM_MODE_COMMAND) {
             set_data(PHONE_CELL_DATA_WAITING);
+        }
+        if (route_wait < wait) {
+            wait = route_wait;                      /* the Wi-Fi delay ends before the next poll */
         }
         log_change();
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait));
@@ -593,6 +649,13 @@ extern "C" bool phone_cell_data_enabled(void)
     return s_want_data;
 }
 
+extern "C" void phone_cell_wifi_changed(void)
+{
+    if (s_task && s_want && s_want_data) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
 extern "C" bool phone_cell_busy(void)
 {
     return s_want || s_powered;
@@ -638,6 +701,7 @@ extern "C" const char *phone_cell_data_text(phone_cell_data_t data)
     case PHONE_CELL_DATA_CONNECTING: return T("Đang nối…", "Connecting…");
     case PHONE_CELL_DATA_UP: return T("Đã nối", "Connected");
     case PHONE_CELL_DATA_FAILED: return T("Lỗi, sẽ thử lại", "Failed, trying again");
+    case PHONE_CELL_DATA_STANDBY: return T("Dự phòng (Wi-Fi)", "Standby (Wi-Fi)");
     }
     return "";
 }

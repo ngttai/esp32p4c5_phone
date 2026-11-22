@@ -48,6 +48,7 @@ phone_net_status_t s_st;
 SavedList s_list;                 // guarded by s_mtx
 int s_try = 0;                    // index in s_list of the current attempt; guarded by s_mtx
 int s_fail = 0;                   // consecutive failures on s_try; guarded by s_mtx
+int s_other = 0;                  // the last other saved network tried (1..count-1); guarded by s_mtx
 std::atomic<bool> s_ready{false};
 char s_c5_ver[16];                // written once before s_c5_ver_ok is set
 std::atomic<bool> s_c5_ver_ok{false};
@@ -165,6 +166,7 @@ void start_attempt(int idx)
     s_pend_pass[0] = '\0';
     wifi_config_t cfg = {};
     if (build_cfg(idx, &cfg)) {
+        ESP_LOGI(TAG, "Wifi try %d: %s", idx, reinterpret_cast<const char *>(cfg.sta.ssid));
         esp_wifi_set_config(WIFI_IF_STA, &cfg);
         esp_wifi_connect();
     }
@@ -210,15 +212,24 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
                 if (retry) {
                     /* a router drop of a working link is retried on the same network first; only
                      * repeated failures move on to the next saved one */
-                    if (++s_fail >= SAME_TRIES) {
+                    /* the last used network (index 0) gets most attempts: SAME_TRIES on it, then one on
+                     * another saved network in turn, then back (a phone hotspot that comes back is found
+                     * within a minute even with five networks saved) */
+                    if (s_try != 0 || ++s_fail >= SAME_TRIES) {
                         s_fail = 0;
-                        s_try = (s_try + 1) % s_list.count;
+                        if (s_try == 0 && s_list.count > 1) {
+                            s_other = s_other % (s_list.count - 1) + 1;
+                            s_try = s_other;
+                        } else {
+                            s_try = 0;
+                        }
                     }
                 }
                 s_st.wifi_connected = false;
                 s_st.wifi_connecting = retry;
                 s_st.rssi = 0;
             }
+            phone_cell_wifi_changed();      /* Wi-Fi first: 4G takes over if this lasts */
             if (retry) {
                 esp_timer_start_once(s_retry, was_up ? RETRY_DROP_US : RETRY_US);
             }
@@ -256,6 +267,7 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
         }
         ESP_LOGI(TAG, "Wifi up %s", s_st.ip);
         sntp_start_once();
+        phone_cell_wifi_changed();
     }
 }
 
@@ -388,6 +400,7 @@ extern "C" void phone_net_disconnect(void)
     s_auto = false;
     esp_timer_stop(s_retry);
     esp_wifi_disconnect();
+    phone_cell_wifi_changed();          /* Wi-Fi off by the user: mobile data at once */
 }
 
 extern "C" void phone_net_enable(void)
@@ -508,6 +521,7 @@ extern "C" void phone_net_connect(const char *ssid, const char *pass)
         s_user_op = true;
         s_auto = false;
     }
+    s_enabled = true;                   /* the user picked a network: Wi-Fi is on (4G goes back to standby) */
     esp_timer_stop(s_retry);
     wifi_config_t cfg = {};
     {

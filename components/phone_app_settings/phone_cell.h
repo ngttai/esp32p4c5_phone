@@ -10,8 +10,10 @@ extern "C" {
  * 4G service (stages 1-2 of PLAN_4G.md): powers the ML307C modem when 4G is on (NVS key "cell"), reads its
  * identity once, then polls SIM, registration, signal, operator and the data context over AT. With mobile
  * data on (NVS key "cdata") it brings up PPP through esp_modem, in CMUX when the module takes it (AT keeps
- * working beside the data), else in plain data mode (the last signal stays shown). The PPP interface has a
- * lower route priority than Wi-Fi: lwIP uses it only while Wi-Fi is down. One task owns the modem UART; the
+ * working beside the data), else in plain data mode (the last signal stays shown). Stage 3: Wi-Fi first,
+ * PPP only after Wi-Fi has been lost for WIFI_LOST_MS (or turned off by the user), down again once Wi-Fi has
+ * been back for WIFI_BACK_MS; the modem stays registered meanwhile ("standby"). The PPP interface also has a
+ * lower route priority than Wi-Fi. One task owns the modem UART; the
  * Debug > 4G probe only runs while 4G is off.
  */
 typedef enum {
@@ -20,6 +22,7 @@ typedef enum {
     PHONE_CELL_DATA_CONNECTING,
     PHONE_CELL_DATA_UP,
     PHONE_CELL_DATA_FAILED,     /**< tries again in a moment */
+    PHONE_CELL_DATA_STANDBY,    /**< on, but Wi-Fi carries the traffic: PPP comes up when Wi-Fi is lost */
 } phone_cell_data_t;
 
 typedef enum {
@@ -63,6 +66,8 @@ const char *phone_cell_data_text(phone_cell_data_t data);
 /** The modem is powered or being powered (the probe must not run) */
 bool phone_cell_busy(void);
 void phone_cell_get(phone_cell_info_t *out);
+/** Wi-Fi went up or down (from phone_net): the route choice is checked at once */
+void phone_cell_wifi_changed(void);
 /** Short state text for a tile or a row, in the phone language */
 const char *phone_cell_state_text(phone_cell_state_t state);
 
