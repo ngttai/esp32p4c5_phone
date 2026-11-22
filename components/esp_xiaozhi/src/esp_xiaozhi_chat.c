@@ -556,7 +556,8 @@ static esp_err_t esp_xiaozhi_chat_mcp_handler(esp_xiaozhi_chat_t *xiaozhi_chat, 
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI(TAG, "Received MCP message: %s", payload_mcp);
+    /* Debug only: "initialize" carries the vision token of the account */
+    ESP_LOGD(TAG, "Received MCP message: %s", payload_mcp);
 
     const char *response_session = xiaozhi_chat->session_id[0] ? xiaozhi_chat->session_id : NULL;
     (void)esp_mcp_mgr_set_request_context(xiaozhi_chat->mcp_mgr_handle, NULL, NULL, true);
@@ -1455,6 +1456,8 @@ esp_err_t esp_xiaozhi_chat_start(esp_xiaozhi_chat_handle_t chat_hd)
         .instance = xiaozhi_chat->mcp_engine,
     };
 
+    /* mcp-c-sdk logs every message it gets at INFO, the vision token of "initialize" too */
+    esp_log_level_set("esp_mcp_mgr", ESP_LOG_WARN);
     ret = esp_mcp_mgr_init(mcp_mgr_config, &xiaozhi_chat->mcp_mgr_handle);
     ESP_GOTO_ON_ERROR(ret, error, TAG, "Failed to initialize MCP manager: %s", esp_err_to_name(ret));
 
