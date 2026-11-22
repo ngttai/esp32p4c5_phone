@@ -214,11 +214,7 @@ void on_wifi(lv_event_t *e)
         open_settings(Open::WIFI);
         return;
     }
-    if (phone_net_is_enabled()) {
-        phone_net_disconnect();
-    } else {
-        phone_net_enable();
-    }
+    phone_net_set_enabled(!phone_net_is_enabled());
     refresh(nullptr);
 }
 

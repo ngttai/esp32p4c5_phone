@@ -30,6 +30,8 @@ void phone_net_connect(const char *ssid, const char *pass);
 void phone_net_disconnect(void);
 /** User turns Wi-Fi on: reconnect through the saved list and resume auto reconnect. */
 void phone_net_enable(void);
+/** The Wi-Fi switch (Settings, quick settings): kept across a restart (NVS key "wifi"), then disconnect or enable. */
+void phone_net_set_enabled(bool on);
 /** Wi-Fi on for the user: true until phone_net_disconnect(), again after phone_net_enable(). */
 bool phone_net_is_enabled(void);
 /** Number of saved networks (0..5). */

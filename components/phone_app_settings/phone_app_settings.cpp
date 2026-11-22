@@ -934,11 +934,11 @@ void on_wifi_toggle(lv_event_t *e)
         }
     }
     if (s_wifi_on) {
-        phone_net_enable();
+        phone_net_set_enabled(true);
         s_wifi_state = WIFI_IDLE;
         wifi_scan();
     } else {
-        phone_net_disconnect();
+        phone_net_set_enabled(false);
         set_list_empty(true);
         s_wifi_state = WIFI_IDLE;
     }

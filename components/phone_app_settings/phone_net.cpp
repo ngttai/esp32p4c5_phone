@@ -1,5 +1,6 @@
 #include "phone_net.h"
 #include "phone_cell.h"
+#include "phone_locale.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -196,7 +197,9 @@ void on_event(void *, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT) {
         if (id == WIFI_EVENT_STA_START) {
-            phone_net_enable();
+            if (phone_pref_get("wifi", 1)) {        /* turned off before a restart: stays off */
+                phone_net_enable();
+            }
         } else if (id == WIFI_EVENT_STA_DISCONNECTED) {
             bool retry;
             bool was_up;
@@ -304,7 +307,12 @@ bool wifi_start()
     s_ready = true;
     ESP_LOGI(TAG, "Wifi started");
     /* STA_START fired inside bsp_wifi_init(), before the handlers above existed */
-    phone_net_enable();
+    if (phone_pref_get("wifi", 1)) {
+        phone_net_enable();
+    } else {
+        s_enabled = false;
+        ESP_LOGI(TAG, "Wifi off (switched off before the restart)");
+    }
     return true;
 }
 
@@ -342,6 +350,7 @@ extern "C" void phone_net_start(void)
         return;
     }
     s_mtx = xSemaphoreCreateMutex();
+    s_enabled = phone_pref_get("wifi", 1) != 0;   /* the switch before a restart; the tile shows it at once */
     {
         Lock l;
         list_load();
@@ -401,6 +410,16 @@ extern "C" void phone_net_disconnect(void)
     esp_timer_stop(s_retry);
     esp_wifi_disconnect();
     phone_cell_wifi_changed();          /* Wi-Fi off by the user: mobile data at once */
+}
+
+extern "C" void phone_net_set_enabled(bool on)
+{
+    phone_pref_set("wifi", on ? 1 : 0);
+    if (on) {
+        phone_net_enable();
+    } else {
+        phone_net_disconnect();
+    }
 }
 
 extern "C" void phone_net_enable(void)
@@ -522,6 +541,7 @@ extern "C" void phone_net_connect(const char *ssid, const char *pass)
         s_auto = false;
     }
     s_enabled = true;                   /* the user picked a network: Wi-Fi is on (4G goes back to standby) */
+    phone_pref_set("wifi", 1);
     esp_timer_stop(s_retry);
     wifi_config_t cfg = {};
     {
