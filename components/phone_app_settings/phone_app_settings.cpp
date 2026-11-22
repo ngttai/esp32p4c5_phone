@@ -1257,7 +1257,8 @@ enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_DATA, CR_DATA_IP, CR_LIN
 lv_obj_t *s_cellular_sw;
 lv_obj_t *s_cdata_sw;
 lv_obj_t *s_cellular_vals[CR_COUNT];
-lv_obj_t *s_cellular_hint;          /* what to do about a problem, under the status rows; hidden without one */
+lv_obj_t *s_cellular_hint;
+lv_obj_t *s_usage_since;            /* "since dd/mm", second line of the Used row; hidden without a date */          /* what to do about a problem, under the status rows; hidden without one */
 
 void set_text_if_changed(lv_obj_t *label, const char *text)
 {
@@ -1356,10 +1357,18 @@ void cellular_refresh()
             const time_t t = static_cast<time_t>(since);
             struct tm tmv;
             localtime_r(&t, &tmv);
-            snprintf(from, sizeof(from), T("  từ %02d/%02d", "  since %02d/%02d"), tmv.tm_mday, tmv.tm_mon + 1);
+            snprintf(from, sizeof(from), T("từ %02d/%02d", "since %02d/%02d"), tmv.tm_mday, tmv.tm_mon + 1);
         }
-        snprintf(buf, sizeof(buf), LV_SYMBOL_DOWN " %s  " LV_SYMBOL_UP " %s%s", d, u, from);
+        snprintf(buf, sizeof(buf), LV_SYMBOL_DOWN " %s   " LV_SYMBOL_UP " %s", d, u);
         set_text_if_changed(s_cellular_vals[CR_USAGE], buf);
+        if (s_usage_since) {
+            set_text_if_changed(s_usage_since, from);
+            if (from[0]) {
+                lv_obj_remove_flag(s_usage_since, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(s_usage_since, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
     }
     set_text_if_changed(s_cellular_vals[CR_STATE], phone_cell_state_text(on ? ci.state : PHONE_CELL_OFF));
     if (ci.oper[0]) {
@@ -1417,10 +1426,30 @@ void build_cellular_page(lv_obj_t *root)
         lv_obj_t *g = make_group(p, groups[gi]);
         for (int r = first[gi]; r < first[gi + 1]; r++) {
             lv_obj_t *v = kv_row(g, T(rows[r].vi, rows[r].en));
-            lv_obj_set_style_max_width(v, 280, 0);
-            lv_label_set_long_mode(v, LV_LABEL_LONG_MODE_DOTS);
+            /* the value takes all the room after the key, right-aligned: a long APN or IPv6 stays on one line */
+            lv_obj_set_flex_grow(v, 1);
+            lv_obj_set_style_pad_left(v, 16, 0);
+            lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
             lv_label_set_text(v, "--");
             s_cellular_vals[rows[r].row] = v;
+            /* the row grows with a value on several lines instead of spilling over the next one */
+            lv_obj_t *row = lv_obj_get_parent(v);
+            lv_obj_set_height(row, LV_SIZE_CONTENT);
+            lv_obj_set_style_min_height(row, 64, 0);
+            lv_obj_set_style_pad_ver(row, 12, 0);
+            if (rows[r].row == CR_USAGE) {
+                /* two lines: the counts, then "since dd/mm" small under them */
+                lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
+                s_usage_since = lv_label_create(row);
+                lv_obj_add_flag(s_usage_since, LV_OBJ_FLAG_FLEX_IN_NEW_TRACK);
+                lv_obj_set_width(s_usage_since, LV_PCT(100));
+                lv_obj_set_style_text_align(s_usage_since, LV_TEXT_ALIGN_RIGHT, 0);
+                lv_obj_set_style_text_font(s_usage_since, phone_font_by_size(16), 0);
+                lv_obj_set_style_text_color(s_usage_since, lv_color_hex(COLOR_SUB), 0);
+                lv_obj_set_style_text_opa(s_usage_since, LV_OPA_70, 0);
+                lv_label_set_text(s_usage_since, "");
+                lv_obj_add_flag(s_usage_since, LV_OBJ_FLAG_HIDDEN);
+            }
         }
         if (first[gi] == CR_STATE) {
             s_cellular_hint = make_text(g, "", 0xF2994A);
@@ -1774,6 +1803,8 @@ void build_ui()
     s_cellular_sw = nullptr;
     s_cdata_sw = nullptr;
     memset(s_cellular_vals, 0, sizeof(s_cellular_vals));
+    s_cellular_hint = nullptr;
+    s_usage_since = nullptr;
     s_cell_shown = SIZE_MAX;
     s_kb = nullptr;
     s_cur_page = PAGE_MAIN;
