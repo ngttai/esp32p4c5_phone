@@ -17,6 +17,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "phone_paths.h"
 #include "driver/jpeg_encode.h"
 #include "driver/ppa.h"
 #include "esp_heap_caps.h"
@@ -57,7 +58,7 @@ constexpr int PREVIEW_H = 640;
 constexpr int BUFS = 2;                     // V4L2 frame buffers
 constexpr int ALIGN = 128;                  // L2 cache line, required for PPA output buffers
 constexpr int JPEG_QUALITY = 90;
-constexpr const char *PHOTO_DIR = "/sdcard/DCIM";
+constexpr const char *PHOTO_DIR = PHONE_SD_DCIM;
 /* How the sensor image is turned to stand upright on the portrait screen (counter-clockwise) */
 constexpr ppa_srm_rotation_angle_t ROTATION = PPA_SRM_ROTATION_ANGLE_90;
 constexpr bool MIRROR_X = false;

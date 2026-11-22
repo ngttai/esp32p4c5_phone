@@ -5,7 +5,7 @@
 namespace esp_brookesia::apps {
 
 /**
- * Radio: HLS internet radio stations listed in /sdcard/radio/stations.json (no built-in list), with a
+ * Radio: HLS internet radio stations listed in /sdcard/appdata/radio/stations.json (no built-in list), with a
  * 12-band spectrum. It keeps playing in the background; closing the app stops it, and so does another
  * player taking the speaker.
  */

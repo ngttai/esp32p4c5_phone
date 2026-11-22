@@ -1,6 +1,6 @@
 /*
  * Radio app: station name, status and stream format, a 12-band spectrum, previous / play-stop / next,
- * volume, and the station list (from /sdcard/radio/stations.json, see radio_stations.cpp). The sound and
+ * volume, and the station list (from appdata/radio/stations.json on the card, see radio_stations.cpp). The sound and
  * the spectrum come from radio_player.cpp; this file only reads their state from an LVGL timer.
  */
 #include <cstdio>
@@ -212,21 +212,21 @@ void show_list_state()
                 "The microSD card cannot be read (absent, or lent as a USB drive).");
         break;
     case radio::ListResult::NO_FILE:
-        why = T("Thẻ nhớ chưa có tệp radio/stations.json.", "The card has no radio/stations.json.");
+        why = T("Thẻ nhớ chưa có tệp appdata/radio/stations.json.", "The card has no appdata/radio/stations.json.");
         break;
     case radio::ListResult::BAD_FILE:
-        why = T("Tệp radio/stations.json bị lỗi (không phải JSON, hoặc lớn hơn 64 KB).",
-                "radio/stations.json is broken (not JSON, or larger than 64 KB).");
+        why = T("Tệp appdata/radio/stations.json bị lỗi (không phải JSON, hoặc lớn hơn 64 KB).",
+                "appdata/radio/stations.json is broken (not JSON, or larger than 64 KB).");
         break;
     default:
-        why = T("Tệp radio/stations.json không có đài nào dùng được.", "radio/stations.json has no usable station.");
+        why = T("Tệp appdata/radio/stations.json không có đài nào dùng được.", "appdata/radio/stations.json has no usable station.");
         break;
     }
     lv_label_set_text(s_status, why);
     lv_label_set_text(s_empty_text,
-                      T("Chép tệp mẫu sdcard/radio/stations.json trong repo vào thư mục radio của thẻ "
+                      T("Chép tệp mẫu sdcard/appdata/radio/stations.json trong repo vào thư mục appdata/radio của thẻ "
                         "(dùng ổ USB của app Tệp), rồi bấm Thử lại.\n\nMỗi đài: { \"name\": \"Tên đài\", \"url\": \"https://.../playlist.m3u8\" }",
-                        "Copy the sample sdcard/radio/stations.json of the repository to the radio folder of "
+                        "Copy the sample sdcard/appdata/radio/stations.json of the repository to the appdata/radio folder of "
                         "the card (USB drive of the Files app), then tap Retry.\n\nEach station: { \"name\": \"Name\", \"url\": \"https://.../playlist.m3u8\" }"));
 }
 

@@ -7,6 +7,6 @@ names of the Xiaozhi protocol use (`assistant_emote.cpp` has the table). The oth
 music, mute, ...) are not used. The downloaded pack has no license file: the license of these assets is not
 confirmed.
 
-A memory card can replace any of them: `/sdcard/assistant/emote/<emotion>.eaf` (for example `happy.eaf`), or
+A memory card can replace any of them: `/sdcard/appdata/assistant/emote/<emotion>.eaf` (for example `happy.eaf`), or
 `pack_<name>.eaf` as named in the pack, so a folder of the pack (`eaf_466x466`, ...) can be copied as it is.
 Up to 480 x 480; other sizes are scaled into the 360 x 360 face.

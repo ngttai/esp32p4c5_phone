@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+#include "phone_paths.h"
 #include "esp_log.h"
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
@@ -49,7 +50,7 @@ namespace {
 
 const char *TAG = "phone_files";
 
-constexpr const char *ROOT = "/sdcard";
+constexpr const char *ROOT = PHONE_SD_ROOT;
 constexpr int MAX_ENTRIES = 300;
 constexpr int HEADER_H = 64;
 constexpr int FOOTER_H = 64;        // storage line + the navigation gesture strip

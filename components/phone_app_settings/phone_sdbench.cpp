@@ -1,3 +1,4 @@
+#include "phone_paths.h"
 #include "phone_sdbench.h"
 #include <cstdio>
 #include <cstring>
@@ -19,7 +20,7 @@ const char *HOLDER = "SD test";
 constexpr size_t FILE_SIZE = 8 * 1024 * 1024;
 constexpr size_t SRAM_BUF = 32 * 1024;
 constexpr size_t PSRAM_BUF = 64 * 1024;
-const char *PATH = CONFIG_BSP_SD_MOUNT_POINT "/.sdbench.bin";
+const char *PATH = PHONE_SD_SDBENCH;
 
 std::mutex s_mtx;
 phone_sdbench_t s_res;
@@ -35,6 +36,7 @@ bool run(uint8_t *buf, size_t size, uint32_t *wr, uint32_t *rd)
     for (size_t i = 0; i < size; i++) {
         buf[i] = static_cast<uint8_t>(i * 7 + 3);
     }
+    phone_sd_make_dirs(PATH);
     FILE *f = fopen(PATH, "wb");
     if (!f) {
         return false;

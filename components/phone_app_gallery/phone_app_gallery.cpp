@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+#include "phone_paths.h"
 #include "driver/jpeg_decode.h"
 #include "driver/ppa.h"
 #include "esp_heap_caps.h"
@@ -49,7 +50,7 @@ namespace {
 
 const char *TAG = "phone_gallery";
 
-constexpr const char *PHOTO_DIR = "/sdcard/DCIM";
+constexpr const char *PHOTO_DIR = PHONE_SD_DCIM;
 constexpr int MAX_PHOTOS = 120;             // newest ones; each thumbnail takes 45 KB of PSRAM
 constexpr int THUMB = 150;                  // thumbnail and grid cell size, px
 constexpr int GRID_GAP = 10;

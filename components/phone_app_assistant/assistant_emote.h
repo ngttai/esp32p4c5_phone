@@ -1,7 +1,7 @@
 /*
  * Animated face of the assistant: EAF eye animations picked by the emotion name of the Xiaozhi
  * protocol ("happy", "thinking", ...). Built-in set: Espressif's Emote Pack (360x360); a card can override
- * any of them with /sdcard/assistant/emote/<emotion>.eaf or pack_<name>.eaf. All functions run in the LVGL task.
+ * any of them with appdata/assistant/emote/ on the card,<emotion>.eaf or pack_<name>.eaf. All functions run in the LVGL task.
  */
 #pragma once
 

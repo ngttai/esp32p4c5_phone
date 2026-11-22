@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "phone_paths.h"
 #include "phone_storage.h"
 #include "assistant_emote.h"
 extern "C" {
@@ -59,9 +60,9 @@ const struct {
     {"surprised", PACK(surprised), 20}, {"shocked", PACK(shocked), 20}, {"sleepy", PACK(asleep), 5},
 };
 
-/* A card can bring its own faces: /sdcard/assistant/emote/<emotion>.eaf, else pack_<name>.eaf (a folder of the
+/* A card can bring its own faces: appdata/assistant/emote/<emotion>.eaf, else pack_<name>.eaf (a folder of the
  * Emote Pack copied as it is); any size up to MAX_SIDE, shown scaled into the SIZE square */
-constexpr const char *SD_DIR = "/sdcard/assistant/emote";
+constexpr const char *SD_DIR = PHONE_SD_ASSISTANT_EMOTE;
 constexpr int MAX_SIDE = 480;
 constexpr size_t MAX_FILE = 4 * 1024 * 1024;
 

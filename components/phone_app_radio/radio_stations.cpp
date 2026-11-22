@@ -7,6 +7,7 @@
 #include "cJSON.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "phone_paths.h"
 #include "phone_storage.h"
 #include "sdkconfig.h"
 
@@ -15,7 +16,7 @@ namespace radio {
 namespace {
 
 const char *TAG = "radio_list";
-const char *PATH = CONFIG_BSP_SD_MOUNT_POINT "/radio/stations.json";
+const char *PATH = PHONE_SD_RADIO_STATIONS;
 constexpr long MAX_FILE = 64 * 1024;
 constexpr size_t MAX_STATIONS = 100;
 
@@ -33,8 +34,14 @@ ListResult load_stations(std::vector<Station> &out)
         return ListResult::NO_CARD;
     }
     struct stat st = {};
+    PATH = PHONE_SD_RADIO_STATIONS;
     if (stat(PATH, &st) != 0) {
-        return ListResult::NO_FILE;
+        /* v0.1.0 kept the list at radio/stations.json */
+        PATH = PHONE_SD_OLD_RADIO_STATIONS;
+        if (stat(PATH, &st) != 0) {
+            return ListResult::NO_FILE;
+        }
+        ESP_LOGW(TAG, "using %s: its place is now %s", PATH, PHONE_SD_RADIO_STATIONS);
     }
     if (st.st_size <= 0 || st.st_size > MAX_FILE) {
         ESP_LOGW(TAG, "%s: %ld bytes", PATH, static_cast<long>(st.st_size));

@@ -23,6 +23,7 @@
 #include <unordered_set>
 #include <strings.h>
 #include <vector>
+#include "phone_paths.h"
 #include "decoder/esp_audio_dec_default.h"
 #include "driver/jpeg_decode.h"
 #include "driver/ppa.h"
@@ -67,7 +68,7 @@ namespace {
 
 const char *TAG = "phone_music";
 
-constexpr const char *CARD = "/sdcard";
+constexpr const char *CARD = PHONE_SD_ROOT;
 constexpr size_t IN_SIZE = 4096;
 constexpr size_t PCM_SIZE = 16 * 1024;
 constexpr int CARD_H = 392;         // now-playing card
@@ -757,8 +758,7 @@ struct Row {
 
 /* ---- favorites: one path per line, relative to the card, in a text file of the card ---- */
 
-constexpr const char *FAV_DIR = "/sdcard/Music";
-constexpr const char *FAV_FILE = "/sdcard/Music/favorites.txt";
+constexpr const char *FAV_FILE = PHONE_SD_MUSIC_FAVORITES;
 std::unordered_set<std::string> s_favs;
 bool s_only_fav;                // the list shows the favorites only
 
@@ -772,6 +772,9 @@ void load_favorites()
 {
     s_favs.clear();
     FILE *f = fopen(FAV_FILE, "r");
+    if (!f) {
+        f = fopen(PHONE_SD_OLD_MUSIC_FAVORITES, "r");       /* v0.1.0; the next save writes the new place */
+    }
     if (!f) {
         return;
     }
@@ -793,7 +796,7 @@ bool save_favorites()
 {
     std::vector<std::string> lines(s_favs.begin(), s_favs.end());
     std::sort(lines.begin(), lines.end());
-    mkdir(FAV_DIR, 0775);
+    phone_sd_make_dirs(FAV_FILE);
     FILE *f = fopen(FAV_FILE, "w");
     if (!f) {
         ESP_LOGE(TAG, "cannot write %s", FAV_FILE);

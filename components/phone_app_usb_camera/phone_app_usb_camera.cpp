@@ -17,6 +17,7 @@
 #include <ctime>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "phone_paths.h"
 #include "driver/jpeg_decode.h"
 #include "driver/ppa.h"
 #include "esp_heap_caps.h"
@@ -63,7 +64,7 @@ constexpr size_t FRAME_SIZE = 512 * 1024;   // one MJPEG frame of the webcam
 constexpr int MAX_W = 640;
 constexpr int MAX_H = 480;
 constexpr int FORMATS_MAX = 48;
-constexpr const char *PHOTO_DIR = "/sdcard/DCIM";
+constexpr const char *PHOTO_DIR = PHONE_SD_DCIM;
 
 enum State { ST_OFF, ST_WAITING, ST_OPENING, ST_STREAMING, ST_ERROR };
 enum Shot { SHOT_NONE, SHOT_REQUESTED, SHOT_SAVED, SHOT_FAILED, SHOT_NO_CARD };

@@ -28,6 +28,7 @@
 #include <string>
 #include <strings.h>
 #include <vector>
+#include "phone_paths.h"
 #include "driver/jpeg_decode.h"
 #include "driver/ppa.h"
 #include "esp_heap_caps.h"
@@ -73,7 +74,7 @@ namespace {
 
 const char *TAG = "phone_video";
 
-constexpr const char *CARD = "/sdcard";
+constexpr const char *CARD = PHONE_SD_ROOT;
 const char *const HOLD_NAME = "Video";     // holder of the card while the app runs (phone_storage_hold)
 constexpr int MAX_FILES = 200;
 constexpr int SCAN_DEPTH = 2;
