@@ -7,7 +7,7 @@ dependencies:
   esp32p4c5_bsp:
     git: https://github.com/ngttai/esp32p4c5_bsp.git
     path: bsp/esp32p4c5_bsp
-    version: v0.2.0
+    version: v0.2.1
 
   brookesia_core:
     version: "*"
