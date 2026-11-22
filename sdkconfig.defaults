@@ -130,6 +130,9 @@ CONFIG_SR_WN_WN9_HIESP=y
 
 # 4G data (PLAN_4G.md stage 2): PPP over the ML307C UART through esp_modem
 CONFIG_LWIP_PPP_SUPPORT=y
+# 4G: no IPv6 over PPP. IPV6CP with the ML307C loops forever (both sides want the same interface identifier:
+# Configure-Request / Nak at ~30 KB/s each way, even idle); the Internet goes over IPv4 (IPCP) anyway
+# CONFIG_LWIP_PPP_ENABLE_IPV6 is not set
 # 4G: AT+CGCONTRDP of an IPV4V6 context is two long lines (IPv6 address, mask, DNS)
 CONFIG_ESP_MODEM_C_API_STR_MAX=1024
 # 4G: DNS follows the default netif (else the carrier DNS stays after PPP and fails over Wi-Fi)
