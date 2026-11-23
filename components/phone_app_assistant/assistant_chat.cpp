@@ -16,6 +16,7 @@
  */
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include "decoder/impl/esp_opus_dec.h"
@@ -54,7 +55,7 @@ constexpr size_t PCM_BYTES = 8192;          // one decoded packet (up to 120 ms 
 
 enum Cmd {
     CMD_BUTTON, CMD_CONNECTED, CMD_DISCONNECTED, CMD_CHANNEL_OPENED, CMD_CHANNEL_CLOSED, CMD_GOODBYE,
-    CMD_TTS_START, CMD_TTS_STOP, CMD_OPTIONS, CMD_STOP,
+    CMD_TTS_START, CMD_TTS_STOP, CMD_OPTIONS, CMD_CALIBRATE, CMD_STOP,
 };
 
 struct Packet {
@@ -87,6 +88,7 @@ bool s_goodbye;                             // the server ended the conversation
 bool s_connected;                           // link to the server, as last reported
 bool s_wake;                                // the wake word model is loaded; the idle microphone listens for it
 bool s_options_changed;                     // a switch changed: models opened or closed when no conversation is open
+bool s_calibrate;                           // measure the echo delay once no conversation is open
 bool s_wake_want = true, s_barge_want = true;   // the switches, as they are now (a switch turned off acts at once)
 int16_t *s_wake_buf;
 bool s_afe_on;                              // saying the wake word over the answer interrupts it (esp-sr front-end)
@@ -245,19 +247,20 @@ void ref_reset()
     taskEXIT_CRITICAL(&s_ref_mux);
 }
 
-/* The speaker is about to play n samples */
-void ref_put(const int16_t *pcm, int n)
+/* The speaker is about to play n samples; returns where they start on the timeline */
+int64_t ref_put(const int16_t *pcm, int n)
 {
     taskENTER_CRITICAL(&s_ref_mux);
-    if (s_ref_ring) {
-        int64_t start = mic_now_locked();
-        start = s_play_end > start ? s_play_end : start;
+    int64_t start = mic_now_locked();
+    start = s_play_end > start ? s_play_end : start;
+    if (s_ref_ring && pcm) {
         for (int k = 0; k < n; k++) {
             s_ref_ring[(start + k) & REF_MASK] = pcm[k];
         }
-        s_play_end = start + n;
     }
+    s_play_end = start + n;
     taskEXIT_CRITICAL(&s_ref_mux);
+    return start;
 }
 
 /* n microphone samples were read: the matching playback comes out, then the clock advances */
@@ -538,6 +541,159 @@ bool open_encoder()
     return s_enc_buf && s_mic_buf && s_enc_in == static_cast<int>(FRAME_SAMPLES * sizeof(int16_t));
 }
 
+/* ---- echo delay calibration (button of the options panel, pref "aecd") ----
+ * A noise burst is played and recorded the way an answer is (60 ms writes placed on the timeline by ref_put,
+ * 60 ms microphone reads advancing it by ref_take); the delay is where the recording best matches the burst.
+ * The timeline does not depend on the case of the speaker: the delay is the buffers of the codecs, the air
+ * between speaker and microphone adds well under 1 ms. */
+
+constexpr int CAL_BURST = RATE * 600 / 1000;
+constexpr int CAL_CHUNKS = CAL_BURST / FRAME_SAMPLES;
+constexpr int CAL_REC = RATE * 1500 / 1000 / FRAME_SAMPLES * FRAME_SAMPLES;
+
+struct CalBurst {
+    const int16_t *pcm;
+    int64_t start[CAL_CHUNKS];      // timeline index of each 60 ms write
+    std::atomic<bool> done;
+};
+
+void cal_writer(void *arg)
+{
+    auto *c = static_cast<CalBurst *>(arg);
+    vTaskDelay(pdMS_TO_TICKS(150));                 // let the recording get going first
+    for (int k = 0; k < CAL_CHUNKS; k++) {
+        xSemaphoreTake(s_spk_lock, portMAX_DELAY);
+        if (s_spk_open) {
+            c->start[k] = ref_put(nullptr, FRAME_SAMPLES);
+            esp_codec_dev_write(s_spk, const_cast<int16_t *>(c->pcm + k * FRAME_SAMPLES), FRAME_SAMPLES * sizeof(int16_t));
+        }
+        xSemaphoreGive(s_spk_lock);
+    }
+    c->done = true;
+    vTaskDelete(nullptr);
+}
+
+/* NVS writes the flash, which disables the cache: not from this task, whose stack is in PSRAM */
+struct PrefJob {
+    const char *key;
+    int value;
+    SemaphoreHandle_t done;
+};
+
+void pref_job(void *arg)
+{
+    auto *job = static_cast<PrefJob *>(arg);
+    phone_pref_set(job->key, job->value);
+    xSemaphoreGive(job->done);
+    vTaskDelete(nullptr);
+}
+
+void pref_set_internal(const char *key, int value)
+{
+    PrefJob job = {key, value, xSemaphoreCreateBinary()};
+    if (!job.done) {
+        return;
+    }
+    if (xTaskCreate(pref_job, "assistant_pref", 3072, &job, 5, nullptr) == pdPASS) {
+        xSemaphoreTake(job.done, portMAX_DELAY);
+    } else {
+        ESP_LOGE(TAG, "pref %s not saved", key);
+    }
+    vSemaphoreDelete(job.done);
+}
+
+void calibrate()
+{
+    auto *burst = static_cast<int16_t *>(heap_caps_malloc(CAL_BURST * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    auto *rec = static_cast<int16_t *>(heap_caps_malloc(CAL_REC * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    auto *ctx = static_cast<CalBurst *>(heap_caps_calloc(1, sizeof(CalBurst), MALLOC_CAP_SPIRAM));
+    if (!burst || !rec || !ctx || !s_ref_buf) {
+        heap_caps_free(burst);
+        heap_caps_free(rec);
+        heap_caps_free(ctx);
+        push_msg(ASSISTANT_CHAT_MSG_NOTICE, T("Không đủ bộ nhớ để hiệu chỉnh", "Not enough memory to calibrate"));
+        return;
+    }
+    if (phone_audio_get_volume() < 30) {
+        push_msg(ASSISTANT_CHAT_MSG_NOTICE, T("Tăng âm lượng (từ 30%) rồi đo lại", "Raise the volume (30% or more) and retry"));
+    } else if (open_codecs()) {
+        push_msg(ASSISTANT_CHAT_MSG_NOTICE, T("Đang đo độ trễ tiếng vọng, giữ yên lặng...", "Measuring the echo delay, keep quiet..."));
+        uint32_t seed = 12345;
+        for (int i = 0; i < CAL_BURST; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            burst[i] = static_cast<int16_t>((static_cast<int32_t>(seed >> 16) - 32768) / 4);    // white noise, -12 dBFS peak
+        }
+        ctx->pcm = burst;
+        for (int k = 0; k < CAL_CHUNKS; k++) {
+            ctx->start[k] = INT64_MIN;
+        }
+        ref_reset();
+        int got = 0;
+        if (xTaskCreate(cal_writer, "assistant_cal", 4096, ctx, 6, nullptr) == pdPASS) {
+            while (got < CAL_REC && esp_codec_dev_read(s_mic, rec + got, FRAME_SAMPLES * sizeof(int16_t)) == ESP_CODEC_DEV_OK) {
+                ref_take(s_ref_buf, FRAME_SAMPLES);
+                got += FRAME_SAMPLES;
+            }
+            while (!ctx->done) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+        } else {
+            ctx->done = true;
+        }
+        close_codecs();
+
+        /* burst sample k * FRAME + j reaches the microphone at start[k] + j + delay */
+        double e_burst = 0, e_rec = 0;
+        for (int i = 0; i < CAL_BURST; i++) {
+            e_burst += static_cast<double>(burst[i]) * burst[i];
+        }
+        for (int i = 0; i < got; i++) {
+            e_rec += static_cast<double>(rec[i]) * rec[i];
+        }
+        constexpr int D_MIN = -400, D_MAX = 4000;
+        int best = 0;
+        double best_corr = 0;
+        for (int d = D_MIN; d <= D_MAX; d++) {
+            int64_t acc = 0;
+            for (int k = 0; k < CAL_CHUNKS; k++) {
+                if (ctx->start[k] == INT64_MIN) {
+                    continue;
+                }
+                const int16_t *b = burst + k * FRAME_SAMPLES;
+                for (int j = 0; j < FRAME_SAMPLES; j += 2) {
+                    const int64_t i = ctx->start[k] + j + d;
+                    if (i >= 0 && i < got) {
+                        acc += static_cast<int32_t>(rec[i]) * b[j];
+                    }
+                }
+            }
+            const double c = std::fabs(static_cast<double>(acc));
+            if (c > best_corr) {
+                best_corr = c;
+                best = d;
+            }
+        }
+        const double score = (e_burst > 0 && e_rec > 0) ? best_corr * 2 / std::sqrt(e_burst * e_rec) : 0;
+        ESP_LOGI(TAG, "echo delay %d samples (%d ms), score %.3f (was %d; first write at %lld, %d samples recorded)",
+                 best, best * 1000 / RATE, score, s_ref_delay, static_cast<long long>(ctx->start[0]), got);
+        char text[128];
+        if (score >= 0.1 && best > D_MIN && best < D_MAX) {
+            snprintf(text, sizeof(text), T("Độ trễ tiếng vọng: %.1f ms (trước %.1f ms), độ tin cậy %.2f",
+                                           "Echo delay: %.1f ms (was %.1f ms), confidence %.2f"),
+                     best * 1000.0 / RATE, s_ref_delay * 1000.0 / RATE, score);
+            s_ref_delay = best;
+            pref_set_internal("aecd", best);
+        } else {
+            snprintf(text, sizeof(text), "%s", T("Không nghe rõ tiếng loa: tăng âm lượng, giữ yên lặng rồi đo lại",
+                                                 "The speaker was not heard clearly: raise the volume, keep quiet and retry"));
+        }
+        push_msg(ASSISTANT_CHAT_MSG_NOTICE, text);
+    }
+    heap_caps_free(burst);
+    heap_caps_free(rec);
+    heap_caps_free(ctx);
+}
+
 /* ---- wake word: only the microphone is open while the assistant is idle ---- */
 
 bool wake_mic_open()
@@ -695,6 +851,13 @@ void session_task(void *)
                 s_options_changed = true;
                 ESP_LOGI(TAG, "switches: wake word %d, barge-in %d", s_wake_want, s_barge_want);
                 break;
+            case CMD_CALIBRATE:
+                if (s_talking) {
+                    push_msg(ASSISTANT_CHAT_MSG_NOTICE, T("Kết thúc hội thoại rồi đo", "End the conversation first"));
+                } else {
+                    s_calibrate = true;
+                }
+                break;
             case CMD_CONNECTED:
                 s_connected = true;
                 if (s_state == ASSISTANT_CHAT_CONNECTING || s_state == ASSISTANT_CHAT_ERROR) {
@@ -765,6 +928,10 @@ void session_task(void *)
         }
         if (!run) {
             break;
+        }
+        if (s_calibrate && !s_talking) {
+            s_calibrate = false;
+            calibrate();
         }
         if (s_options_changed && !s_talking && s_chat) {
             s_options_changed = false;
@@ -884,6 +1051,11 @@ extern "C" void assistant_chat_stop(void)
 extern "C" void assistant_chat_options_changed(void)
 {
     post(CMD_OPTIONS);
+}
+
+extern "C" void assistant_chat_calibrate(void)
+{
+    post(CMD_CALIBRATE);
 }
 
 extern "C" void assistant_chat_button(void)
