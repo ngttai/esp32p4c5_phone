@@ -15,6 +15,7 @@
 #include "bsp/esp-bsp.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
+#include "phone_cell.h"
 #include "phone_net.h"
 #include "phone_power.h"
 
@@ -23,6 +24,10 @@
 LV_FONT_DECLARE(phone_font_clock_120);
 /* Launcher wallpaper of the 480x800 dark stylesheet (shown centered on 0x1A1A1A, as on the launcher) */
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_wallpaper_dark_480_480);
+/* 4G icons of the status bar (phone_cell_icons.c) */
+extern "C" const lv_image_dsc_t phone_cell_nosim, phone_cell_bars0, phone_cell_bars1, phone_cell_bars2,
+       phone_cell_bars3, phone_cell_bars4, phone_cell_4g;
+
 /* Status bar icons of the same stylesheet, so the lock screen matches the status bar */
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_wifi_close_24_24);
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_wifi_level1_24_24);
@@ -145,16 +150,23 @@ void blur_task(void *)
             box_blur_line(buf + x * 3, h, stride, tmp);
         }
     }
-    for (int i = 0; i < stride * h; i++) {
-        buf[i] = static_cast<uint8_t>(buf[i] * DARKEN_PCT / 100);
+    /* Darkened and stored as RGB565, the format of the display: drawn as a plain copy instead of a conversion
+     * of each pixel at every redraw (in place: pixel i is read at 3 i before 2 i is written) */
+    auto *out = reinterpret_cast<uint16_t *>(buf);
+    for (int i = 0; i < w * h; i++) {
+        const int b = buf[i * 3] * DARKEN_PCT / 100;
+        const int g = buf[i * 3 + 1] * DARKEN_PCT / 100;
+        const int r = buf[i * 3 + 2] * DARKEN_PCT / 100;
+        out[i] = static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
     }
     heap_caps_free(tmp);
 
     s_wall_dsc = *src;
+    s_wall_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
     s_wall_dsc.header.w = w;
     s_wall_dsc.header.h = h;
-    s_wall_dsc.header.stride = stride;
-    s_wall_dsc.data_size = stride * h;
+    s_wall_dsc.header.stride = w * 2;
+    s_wall_dsc.data_size = w * 2 * h;
     s_wall_dsc.data = buf;
     s_wall_ready = true;
     ESP_LOGI(TAG, "Wallpaper blurred in %d ms", static_cast<int>((esp_timer_get_time() - t0) / 1000));
@@ -201,15 +213,17 @@ struct FlipDigit {
 };
 
 struct Particle {
-    lv_obj_t *obj;
     float x, y, vx, vy, size, life, decay;
+    uint32_t color;
 };
 
 struct Ui {
     lv_obj_t *root;
     FlipDigit digits[DIGITS];
     lv_obj_t *date;
-    lv_obj_t *wifi_icon;       // top right, as on the status bar: Wi-Fi, battery %, battery icon
+    lv_obj_t *cell_data;       // top right, as on the status bar: "4G", 4G bars, Wi-Fi, battery %, battery icon
+    lv_obj_t *cell_icon;
+    lv_obj_t *wifi_icon;
     lv_obj_t *bat_label;
     lv_obj_t *bat_icon;
     lv_obj_t *track, *knob, *hint;
@@ -420,7 +434,38 @@ void fx_respawn(Particle *p)
     p->size = 3.0f + fx_rand01() * 9.0f;
     p->life = 0.7f + fx_rand01() * 0.3f;
     p->decay = 0.014f + fx_rand01() * 0.022f;
-    lv_obj_set_style_bg_color(p->obj, lv_color_hex((fx_rand() & 1) ? FX_BLUE_BRIGHT : FX_BLUE_SOFT), 0);
+    p->color = (fx_rand() & 1) ? FX_BLUE_BRIGHT : FX_BLUE_SOFT;
+}
+
+/* Where a particle is drawn, relative to the effect area */
+lv_area_t fx_area(const Particle &p)
+{
+    const int sz = LV_MAX(static_cast<int>(p.size * (0.55f + 0.45f * p.life)), 2);
+    lv_area_t a;
+    a.x1 = static_cast<int32_t>(p.x - sz * 0.5f);
+    a.y1 = static_cast<int32_t>(p.y - sz * 0.5f);
+    a.x2 = a.x1 + sz - 1;
+    a.y2 = a.y1 + sz - 1;
+    return a;
+}
+
+/* The particles are drawn here, not as objects: 44 objects invalidated each tick went past the 32 areas LVGL
+ * keeps (LV_INV_BUF_SIZE), so every tick redrew the whole screen (core 0 over 90 %) */
+void fx_draw(lv_event_t *e)
+{
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_area_t box;
+    lv_obj_get_coords(s_ui.fx_root, &box);
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.radius = LV_RADIUS_CIRCLE;
+    for (const Particle &p : s_ui.particles) {
+        lv_area_t a = fx_area(p);
+        lv_area_move(&a, box.x1, box.y1);
+        dsc.bg_color = lv_color_hex(p.color);
+        dsc.bg_opa = static_cast<lv_opa_t>(LV_CLAMP(0, static_cast<int>(p.life * 220.0f), 220));
+        lv_draw_rect(layer, &dsc, &a);
+    }
 }
 
 void fx_stop()
@@ -439,9 +484,24 @@ void fx_stop()
     }
 }
 
+void area_grow(lv_area_t *dst, const lv_area_t &a)
+{
+    dst->x1 = LV_MIN(dst->x1, a.x1);
+    dst->y1 = LV_MIN(dst->y1, a.y1);
+    dst->x2 = LV_MAX(dst->x2, a.x2);
+    dst->y2 = LV_MAX(dst->y2, a.y2);
+}
+
 void fx_tick(lv_timer_t *)
 {
+    /* Each particle dirties where it was and where it is now. A single box around all of them is most of the
+     * effect area every tick; one box per cell of a 4 x 4 grid keeps the redraw small, and two ticks before one
+     * redraw stay under the 32 areas of LVGL (over that it redraws the whole screen) */
+    constexpr int GRID = 4;
+    lv_area_t cells[GRID * GRID];
+    bool used[GRID * GRID] = {};
     for (Particle &p : s_ui.particles) {
+        lv_area_t a = fx_area(p);
         p.x += p.vx;
         p.y += p.vy;
         p.vx *= 0.992f;
@@ -449,11 +509,35 @@ void fx_tick(lv_timer_t *)
         p.life -= p.decay;
         if (p.life <= 0.0f || p.y < -20.0f) {
             fx_respawn(&p);
+            const lv_area_t born = fx_area(p);
+            const int bc = LV_CLAMP(0, static_cast<int>(p.x) * GRID / FX_W, GRID - 1) +
+                           GRID * LV_CLAMP(0, static_cast<int>(p.y) * GRID / FX_H, GRID - 1);
+            if (used[bc]) {
+                area_grow(&cells[bc], born);
+            } else {
+                cells[bc] = born;
+                used[bc] = true;
+            }
+        } else {
+            const lv_area_t now = fx_area(p);
+            area_grow(&a, now);
         }
-        int sz = LV_MAX(static_cast<int>(p.size * (0.55f + 0.45f * p.life)), 2);
-        lv_obj_set_size(p.obj, sz, sz);
-        lv_obj_set_pos(p.obj, static_cast<int>(p.x - sz * 0.5f), static_cast<int>(p.y - sz * 0.5f));
-        lv_obj_set_style_bg_opa(p.obj, static_cast<lv_opa_t>(LV_CLAMP(0, static_cast<int>(p.life * 220.0f), 220)), 0);
+        const int c = LV_CLAMP(0, static_cast<int>((a.x1 + a.x2) / 2) * GRID / FX_W, GRID - 1) +
+                      GRID * LV_CLAMP(0, static_cast<int>((a.y1 + a.y2) / 2) * GRID / FX_H, GRID - 1);
+        if (used[c]) {
+            area_grow(&cells[c], a);
+        } else {
+            cells[c] = a;
+            used[c] = true;
+        }
+    }
+    lv_area_t box;
+    lv_obj_get_coords(s_ui.fx_root, &box);
+    for (int i = 0; i < GRID * GRID; i++) {
+        if (used[i]) {
+            lv_area_move(&cells[i], box.x1, box.y1);
+            lv_obj_invalidate_area(s_ui.fx_root, &cells[i]);      // clipped to the effect area
+        }
     }
 }
 
@@ -469,12 +553,8 @@ void fx_start(int percent)
     lv_obj_align(root, LV_ALIGN_BOTTOM_MID, 0, -(TRACK_H + 40));
     lv_obj_remove_flag(root, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
     s_ui.fx_root = root;
+    lv_obj_add_event_cb(root, fx_draw, LV_EVENT_DRAW_MAIN, nullptr);
     for (Particle &p : s_ui.particles) {
-        p.obj = lv_obj_create(root);
-        lv_obj_remove_style_all(p.obj);
-        lv_obj_set_style_radius(p.obj, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_opa(p.obj, LV_OPA_COVER, 0);
-        lv_obj_remove_flag(p.obj, LV_OBJ_FLAG_CLICKABLE);
         fx_respawn(&p);
         p.y = FX_H - 20.0f - fx_rand01() * (FX_H * 0.75f);
         p.life = fx_rand01();
@@ -512,6 +592,17 @@ void update_status()
         &esp_brookesia_image_middle_status_bar_battery_level3_24_24, &esp_brookesia_image_middle_status_bar_battery_level4_24_24,
         &esp_brookesia_image_middle_status_bar_battery_charge_24_24,
     };
+    static const lv_image_dsc_t *const cell[] = {
+        &phone_cell_nosim, &phone_cell_bars0, &phone_cell_bars1, &phone_cell_bars2, &phone_cell_bars3, &phone_cell_bars4,
+    };
+    bool data_up = false;
+    const int cl = phone_cell_icon_level(&data_up);
+    if (cl >= 0) {
+        lv_image_set_src(s_ui.cell_icon, cell[cl]);
+    }
+    lv_obj_set_flag(s_ui.cell_icon, LV_OBJ_FLAG_HIDDEN, cl < 0);
+    lv_obj_set_flag(s_ui.cell_data, LV_OBJ_FLAG_HIDDEN, !data_up);
+
     phone_net_status_t net = {};
     phone_net_get_status(&net);
     int level = 0;
@@ -673,6 +764,9 @@ void build_ui()
     lv_obj_set_style_pad_column(bar, 6, 0);
     lv_obj_align(bar, LV_ALIGN_TOP_RIGHT, -20, 14);
     lv_obj_remove_flag(bar, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
+    s_ui.cell_data = status_icon(bar);
+    lv_image_set_src(s_ui.cell_data, &phone_cell_4g);
+    s_ui.cell_icon = status_icon(bar);
     s_ui.wifi_icon = status_icon(bar);
     lv_obj_set_style_margin_right(s_ui.wifi_icon, 8, 0);
     s_ui.bat_label = lv_label_create(bar);
@@ -744,6 +838,34 @@ void build_ui()
     lv_obj_add_flag(root, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* The lock screen is on the system layer and covers everything, but LVGL does not know it: each redrawn area
+ * drew the app or the launcher below first (the charging effect cost core 0 70-88 %). What is below is made
+ * fully transparent while locked, which LVGL skips (lv_obj_refr). Not the HIDDEN flag: clearing it on a screen
+ * or a layer (no parent) crashes in lv_obj_mark_layout_as_dirty(NULL). Only what this changed is restored, and
+ * only if it still exists. */
+lv_obj_t *s_below[3];
+
+void below_hide(bool hide)
+{
+    if (hide) {
+        lv_obj_t *const layers[3] = {lv_screen_active(), lv_layer_top(), lv_layer_bottom()};
+        for (int i = 0; i < 3; i++) {
+            s_below[i] = nullptr;
+            if (layers[i] && lv_obj_get_style_opa_layered(layers[i], LV_PART_MAIN) > LV_OPA_MIN) {
+                lv_obj_set_style_opa_layered(layers[i], LV_OPA_TRANSP, LV_PART_MAIN);
+                s_below[i] = layers[i];
+            }
+        }
+        return;
+    }
+    for (lv_obj_t *&o : s_below) {
+        if (o && lv_obj_is_valid(o)) {
+            lv_obj_remove_local_style_prop(o, LV_STYLE_OPA_LAYERED, LV_PART_MAIN);
+        }
+        o = nullptr;
+    }
+}
+
 /* LVGL context. intro: play the flip-in animation (the screen is about to be seen) */
 void lock_show(bool intro)
 {
@@ -759,6 +881,7 @@ void lock_show(bool intro)
         knob_set_x(0);
         lv_obj_remove_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_ui.root);
+        below_hide(true);
     }
     update_clock(false, intro);
     lv_timer_resume(s_ui.clock_timer);
@@ -770,6 +893,7 @@ void unlock()
 {
     fx_stop();
     lv_timer_pause(s_ui.clock_timer);
+    below_hide(false);
     lv_obj_add_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
     s_state = ST_ACTIVE;
     lv_display_trigger_activity(nullptr);

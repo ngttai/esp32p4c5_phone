@@ -216,31 +216,15 @@ extern "C" void app_main(void)
 
             /* 4G: hidden when off, a cross without SIM or answer, dim bars without service, then 1 to 4 bars */
             static int s_cell = -2;
-            phone_cell_info_t ci;
-            phone_cell_get(&ci);
-            int cell = -1;
-            if (phone_cell_is_enabled()) {
-                switch (ci.state) {
-                case PHONE_CELL_NO_SIM:
-                case PHONE_CELL_SIM_LOCKED:
-                case PHONE_CELL_NO_ANSWER:
-                    cell = 0;
-                    break;
-                case PHONE_CELL_REGISTERED:
-                    cell = ci.bars > 0 ? 1 + ci.bars : 1;
-                    break;
-                default:
-                    cell = 1;
-                    break;
-                }
-            }
+            bool data_up = false;
+            const int cell = phone_cell_icon_level(&data_up);
             if (cell != s_cell) {
                 s_cell = cell;
                 phone->getDisplay().getStatusBar()->setIconState(CELL_ICON_ID, cell);
             }
-            /* "4G" only while PPP is up (Wi-Fi gone): not for data off, standby on Wi-Fi or a failed dial */
+            /* "4G" while mobile data carries the traffic */
             static int s_cell_data = -2;
-            const int cell_data = (cell >= 1 && ci.data == PHONE_CELL_DATA_UP) ? 0 : -1;
+            const int cell_data = data_up ? 0 : -1;
             if (cell_data != s_cell_data) {
                 s_cell_data = cell_data;
                 phone->getDisplay().getStatusBar()->setIconState(CELL_DATA_ICON_ID, cell_data);

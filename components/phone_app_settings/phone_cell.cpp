@@ -798,6 +798,33 @@ extern "C" void phone_cell_get(phone_cell_info_t *out)
     }
 }
 
+extern "C" int phone_cell_icon_level(bool *data_up)
+{
+    phone_cell_info_t ci;
+    phone_cell_get(&ci);
+    int level = -1;
+    if (phone_cell_is_enabled()) {
+        switch (ci.state) {
+        case PHONE_CELL_NO_SIM:
+        case PHONE_CELL_SIM_LOCKED:
+        case PHONE_CELL_NO_ANSWER:
+            level = 0;
+            break;
+        case PHONE_CELL_REGISTERED:
+            level = ci.bars > 0 ? 1 + ci.bars : 1;
+            break;
+        default:
+            level = 1;
+            break;
+        }
+    }
+    if (data_up) {
+        /* "4G" only while PPP is up (Wi-Fi gone): not for data off, standby on Wi-Fi or a failed dial */
+        *data_up = level >= 1 && ci.data == PHONE_CELL_DATA_UP;
+    }
+    return level;
+}
+
 extern "C" const char *phone_cell_state_text(phone_cell_state_t state)
 {
     switch (state) {

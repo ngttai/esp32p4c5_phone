@@ -74,6 +74,11 @@ void phone_cell_data_usage(unsigned long long *rx, unsigned long long *tx, long 
 void phone_cell_data_usage_reset(void);
 /** Short state text for a tile or a row, in the phone language */
 const char *phone_cell_state_text(phone_cell_state_t state);
+/**
+ * What the 4G icon shows, as on the status bar: -1 hidden (4G off), 0 cross (no SIM, SIM locked, no answer),
+ * 1 dim bars (no service yet), 2..5 one to four bars. *data_up: mobile data carries the traffic ("4G" label).
+ */
+int phone_cell_icon_level(bool *data_up);
 
 #ifdef __cplusplus
 }
