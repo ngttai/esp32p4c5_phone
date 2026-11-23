@@ -242,7 +242,9 @@ int take_photo(ppa_client_handle_t ppa, const Frame &f, const void *frame)
     return result;
 }
 
-void worker(void *)
+/* One camera session: sensor on, frames until the app stops it or the phone locks, sensor off.
+ * Returns false when the camera failed. */
+bool camera_session()
 {
     int fd = -1;
     void *map[BUFS] = {};
@@ -299,21 +301,22 @@ void worker(void *)
         s_state = ST_ERROR;
     }
 
-    while (ok && !s_stop) {
+    bool failed = !ok;
+    while (ok && !s_stop && !phone_lock_is_locked()) {
         struct v4l2_buffer buf = {};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
         if (ioctl(fd, VIDIOC_DQBUF, &buf) != 0) {
             ESP_LOGE(TAG, "frame read failed");
             s_state = ST_ERROR;
+            failed = true;
             break;
         }
         const void *frame = map[buf.index];
         if (s_shot == SHOT_REQUESTED) {
             s_shot = take_photo(ppa, f, frame);
         }
-        /* Nothing to draw while the lock screen is up */
-        if (!phone_lock_is_locked() && render_preview(ppa, f, frame, s_preview[back])) {
+        if (render_preview(ppa, f, frame, s_preview[back])) {
             if (bsp_display_lock(50)) {
                 if (s_img && !s_stop) {
                     lv_image_set_src(s_img, &s_dsc[back]);
@@ -340,6 +343,27 @@ void worker(void *)
         ppa_unregister_client(ppa);
     }
     bsp_camera_stop();
+    return !failed;
+}
+
+/* While the lock screen is up or the screen is off nothing is seen: the sensor is off (core 0 stayed near 50 %
+ * behind the lock screen), and on again once unlocked. Runs here rather than in an LVGL timer: LVGL is paused
+ * while the screen is off. */
+void worker(void *)
+{
+    while (!s_stop) {
+        if (phone_lock_is_locked()) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
+        s_state = ST_STARTING;
+        if (!camera_session()) {
+            break;
+        }
+        if (!s_stop) {
+            ESP_LOGI(TAG, "locked: camera off until unlocked");
+        }
+    }
     if (s_state != ST_ERROR) {
         s_state = ST_STOPPED;
     }
