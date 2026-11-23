@@ -202,7 +202,6 @@ constexpr int FX_H = 300;
 constexpr int PARTICLES = 44;
 constexpr uint32_t FX_BLUE_SOFT = 0x59B2FF;
 constexpr uint32_t FX_BLUE_BRIGHT = 0x9AD0FF;
-constexpr uint32_t FX_MS = 10000;
 constexpr uint32_t FX_TICK_MS = 33;
 
 struct FlipDigit {
@@ -231,13 +230,12 @@ struct Ui {
     bool clock_primed;
     lv_obj_t *fx_root;
     Particle particles[PARTICLES];
-    lv_timer_t *fx_tick, *fx_stop;
+    lv_obj_t *fx_tip;          // "Charging  57%"
+    lv_timer_t *fx_tick;
     uint32_t rng;
-    bool last_charging, charge_primed;
 };
 
 Ui s_ui;
-std::atomic<bool> s_fx_on_show{false};   // set when the charger woke the screen
 
 void set_char(lv_obj_t *lbl, char ch)
 {
@@ -408,7 +406,10 @@ void make_digit(lv_obj_t *parent, FlipDigit *d)
     d->current = '0';
 }
 
-/* ---- charging effect: particles rising from the bottom for 10 s ---- */
+/* ---- charging effect: particles rising from the bottom ----
+ * Runs while the lock screen is on and the battery charges: started by the clock tick (every second, and when
+ * the lock screen is shown), stopped by it once charging ends (full, or the cable is out), and removed before the
+ * screen goes off (nothing is drawn with the backlight off). */
 
 uint32_t fx_rand()
 {
@@ -470,10 +471,6 @@ void fx_draw(lv_event_t *e)
 
 void fx_stop()
 {
-    if (s_ui.fx_stop) {
-        lv_timer_delete(s_ui.fx_stop);
-        s_ui.fx_stop = nullptr;
-    }
     if (s_ui.fx_tick) {
         lv_timer_delete(s_ui.fx_tick);
         s_ui.fx_tick = nullptr;
@@ -481,6 +478,7 @@ void fx_stop()
     if (s_ui.fx_root) {
         lv_obj_delete(s_ui.fx_root);
         s_ui.fx_root = nullptr;
+        s_ui.fx_tip = nullptr;
     }
 }
 
@@ -541,9 +539,26 @@ void fx_tick(lv_timer_t *)
     }
 }
 
+void fx_set_percent(int percent)
+{
+    if (!s_ui.fx_tip) {
+        return;
+    }
+    char buf[40];
+    if (percent >= 0) {
+        snprintf(buf, sizeof(buf), "%s  %d%%", phone_tr("Đang sạc", "Charging"), percent);
+    } else {
+        snprintf(buf, sizeof(buf), "%s", phone_tr("Đang sạc", "Charging"));
+    }
+    if (strcmp(lv_label_get_text(s_ui.fx_tip), buf) != 0) {
+        lv_label_set_text(s_ui.fx_tip, buf);
+    }
+}
+
 void fx_start(int percent)
 {
     if (s_ui.fx_root) {
+        fx_set_percent(percent);
         return;
     }
     s_ui.rng = lv_tick_get() | 1;
@@ -560,22 +575,13 @@ void fx_start(int percent)
         p.life = fx_rand01();
     }
     lv_obj_t *tip = lv_label_create(root);
-    char buf[40];
-    if (percent >= 0) {
-        snprintf(buf, sizeof(buf), "%s  %d%%", phone_tr("Đang sạc", "Charging"), percent);
-    } else {
-        snprintf(buf, sizeof(buf), "%s", phone_tr("Đang sạc", "Charging"));
-    }
-    lv_label_set_text(tip, buf);
+    s_ui.fx_tip = tip;
+    lv_label_set_text(tip, "");
     lv_obj_set_style_text_font(tip, phone_font_by_size(20), 0);
     lv_obj_set_style_text_color(tip, lv_color_hex(FX_BLUE_SOFT), 0);
     lv_obj_align(tip, LV_ALIGN_BOTTOM_MID, 0, -8);
+    fx_set_percent(percent);
     s_ui.fx_tick = lv_timer_create(fx_tick, FX_TICK_MS, nullptr);
-    s_ui.fx_stop = lv_timer_create([](lv_timer_t *) {
-        s_ui.fx_stop = nullptr;    // one-shot timer deletes itself
-        fx_stop();
-    }, FX_MS, nullptr);
-    lv_timer_set_repeat_count(s_ui.fx_stop, 1);
 }
 
 /* ---- Wi-Fi and battery, top right ---- */
@@ -669,15 +675,12 @@ void update_clock(bool animate, bool intro = false)
     update_status();
     s_ui.clock_primed = true;
 
+    /* the charging effect follows the battery for as long as the lock screen is on */
     bsp_battery_info_t b;
-    if (phone_power_get_battery(&b)) {
-        const bool charging = b.state == BSP_BATTERY_CHARGING;
-        const bool rising = charging && s_ui.charge_primed && !s_ui.last_charging;
-        s_ui.last_charging = charging;
-        s_ui.charge_primed = true;
-        if (rising || (charging && s_fx_on_show.exchange(false))) {
-            fx_start(b.percent);
-        }
+    if (phone_power_get_battery(&b) && b.state == BSP_BATTERY_CHARGING) {
+        fx_start(b.percent);
+    } else {
+        fx_stop();
     }
 }
 
@@ -877,7 +880,6 @@ void lock_show(bool intro)
     }
     if (lv_obj_has_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN)) {
         s_ui.clock_primed = false;
-        s_ui.charge_primed = false;
         knob_set_x(0);
         lv_obj_remove_flag(s_ui.root, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_ui.root);
@@ -910,6 +912,11 @@ void go_off()
     bsp_display_brightness_set(0);
     s_state = ST_OFF;
     wifi_power_save(true);
+    /* nothing runs for the dark screen: the effect is removed (the clock tick starts it again on wake) */
+    if (bsp_display_lock(1000)) {
+        fx_stop();
+        bsp_display_unlock();
+    }
     /* Nothing to draw with the backlight off: stop LVGL and its tick */
     s_paused = esp_lv_adapter_pause(1000) == ESP_OK;
     ESP_LOGI(TAG, "Screen off");
@@ -1050,8 +1057,7 @@ extern "C" void phone_lock_wake(void)
 extern "C" void phone_lock_on_charger(void)
 {
     if (s_worker && s_state == ST_OFF) {
-        s_fx_on_show = true;
-        xTaskNotify(s_worker, NB_WAKE, eSetBits);
+        xTaskNotify(s_worker, NB_WAKE, eSetBits);    // the lock screen shows the charging effect
     }
 }
 
