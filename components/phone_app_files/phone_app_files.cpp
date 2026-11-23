@@ -2,9 +2,12 @@
  * Files app: browse the microSD card. A tap opens a folder, shows a text file or the details of
  * another file; a long press shows the details of any entry. Files and empty folders can be
  * deleted. The USB button lends the card to a PC as a USB drive (mass storage on the USB HS
- * Type-C socket) until it is turned off or the app is left.
+ * Type-C socket) until it is turned off or the app is left. Turning it off while the PC still has
+ * the drive asks for a second tap (the PC may still hold writes in its cache); once the PC ejects
+ * it, the card comes back to the phone by itself.
  */
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -83,12 +86,14 @@ lv_obj_t *s_text_body;
 lv_obj_t *s_usb;            // USB drive panel, over everything
 lv_obj_t *s_usb_state;
 lv_obj_t *s_usb_msg;        // why the USB drive could not start
+lv_obj_t *s_usb_off;        // "Turn off" button of the USB panel
 lv_timer_t *s_timer;
 std::string s_dir;
 std::vector<Entry> s_entries;
 int s_selected = -1;
 uint32_t s_delete_armed_until;
 uint32_t s_usb_msg_until;
+uint32_t s_usb_off_armed_until;     // turning off before the PC ejected: second tap until then
 
 bool s_usb_on;
 /* The card as a block device for the USB drive. The stop command (CMD12) that ends a multiple
@@ -110,6 +115,10 @@ constexpr size_t DMA_ALIGN = 64;
 UsbDisk s_disk;
 bool s_msc_driver;
 tinyusb_msc_storage_handle_t s_msc_storage;
+/* Set from the TinyUSB task: the PC sent eject, and whether it holds the drive open (PREVENT MEDIUM REMOVAL
+ * while a file system is mounted, ALLOW once it is unmounted). */
+std::atomic<bool> s_pc_ejected;
+std::atomic<int> s_pc_lock{-1};     // -1 not told, 0 allowed (unmounted), 1 prevented (mounted)
 
 void format_size(char *buf, size_t len, uint64_t bytes)
 {
@@ -544,6 +553,42 @@ void usb_stop()
     ESP_LOGI(TAG, "USB drive off (card re-initialized %u times)", static_cast<unsigned>(s_disk.recoveries));
 }
 
+/* The PC has the drive and has not ejected or unmounted it: turning off now may lose what it still caches */
+bool usb_held_by_pc()
+{
+    return s_usb_on && tud_mounted() && !s_pc_ejected && s_pc_lock != 0;
+}
+
+/* The PC sent eject (START STOP UNIT with LoEj) */
+bool usb_ejected_by_pc()
+{
+    return s_usb_on && s_pc_ejected;
+}
+
+void disarm_usb_off()
+{
+    s_usb_off_armed_until = 0;
+    if (s_usb_off) {
+        lv_obj_set_style_bg_color(s_usb_off, lv_color_hex(COLOR_USB), 0);
+        lv_label_set_text(lv_obj_get_child(s_usb_off, 0), T("Tắt ổ USB", "Turn off"));
+    }
+}
+
+/* First request while the PC still has the drive arms for 3 s and says why, the second one turns it off */
+bool usb_off_confirmed()
+{
+    if (!usb_held_by_pc() || (s_usb_off_armed_until && lv_tick_get() < s_usb_off_armed_until)) {
+        return true;
+    }
+    s_usb_off_armed_until = lv_tick_get() + 3000;
+    lv_obj_set_style_bg_color(s_usb_off, lv_color_hex(COLOR_DANGER), 0);
+    lv_label_set_text(lv_obj_get_child(s_usb_off, 0), T("Vẫn tắt?", "Turn off anyway?"));
+    lv_obj_set_style_text_color(s_usb_state, lv_color_hex(COLOR_DANGER), 0);
+    lv_label_set_text(s_usb_state, T("Máy tính chưa đẩy ổ ra: thẻ có thể hỏng", "Not ejected on the PC: the card may break"));
+    ESP_LOGW(TAG, "turning the USB drive off before the PC ejected it: asking again");
+    return false;
+}
+
 bool usb_start()
 {
     char holders[96];
@@ -563,6 +608,8 @@ bool usb_start()
         return false;
     }
     s_usb_on = true;
+    s_pc_ejected = false;
+    s_pc_lock = -1;
 
     tinyusb_msc_driver_config_t drv = {};
     drv.user_flags.auto_mount_off = 1;      /* the card stays with the PC until turned off here */
@@ -608,6 +655,7 @@ bool usb_start()
         return false;
     }
     ESP_LOGI(TAG, "USB drive on");
+    disarm_usb_off();
     lv_obj_remove_flag(s_usb, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_usb);
     return true;
@@ -623,6 +671,9 @@ void on_usb(lv_event_t *)
 
 void on_usb_off(lv_event_t *)
 {
+    if (!usb_off_confirmed()) {
+        return;
+    }
     usb_stop();
     show_dir();
 }
@@ -803,9 +854,22 @@ void on_timer(lv_timer_t *)
         s_usb_msg_until = 0;
         lv_obj_add_flag(s_usb_msg, LV_OBJ_FLAG_HIDDEN);
     }
-    if (s_usb_on) {
+    if (s_usb_on && usb_ejected_by_pc()) {
+        ESP_LOGI(TAG, "the PC ejected the USB drive");
+        usb_stop();
+        show_dir();
+        show_usb_msg(T("Máy tính đã đẩy ổ ra, thẻ nhớ về lại điện thoại", "Ejected on the PC: the card is back"));
+        return;
+    }
+    if (s_usb_off_armed_until && lv_tick_get() >= s_usb_off_armed_until) {
+        disarm_usb_off();
+    }
+    if (s_usb_on && !s_usb_off_armed_until) {
+        lv_obj_set_style_text_color(s_usb_state, lv_color_hex(COLOR_SUB), 0);
         lv_label_set_text(s_usb_state, tud_mounted() ? T("Máy tính đã nhận ổ", "Connected to the PC")
                           : T("Đang chờ máy tính...", "Waiting for the PC..."));
+    }
+    if (s_usb_on) {
         lv_display_trigger_activity(nullptr);       /* in use: keep the screen on */
     }
 }
@@ -1015,11 +1079,12 @@ void build_ui()
     lv_obj_set_style_text_font(hint, phone_font_by_size(16), 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(COLOR_SUB), 0);
     lv_label_set_text(hint, T("Cắm cáp vào cổng USB HS (Type-C). Máy tính thấy thẻ nhớ như một ổ USB.\n\n"
-                              "Đẩy ổ ra trên máy tính trước khi tắt. Thoát app cũng tắt ổ USB.",
+                              "Đẩy ổ ra trên máy tính trước khi tắt: thẻ nhớ sẽ tự về điện thoại. Thoát app cũng tắt ổ USB.",
                               "Plug the cable into the USB HS (Type-C) socket. The PC sees the card as a USB drive.\n\n"
-                              "Eject the drive on the PC before turning it off. Leaving the app turns it off too."));
+                              "Eject the drive on the PC before turning it off: the card then comes back by itself. Leaving the app turns it off too."));
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 340);
     lv_obj_t *off = lv_button_create(s_usb);
+    s_usb_off = off;
     lv_obj_remove_style_all(off);
     lv_obj_set_size(off, root_w - 96, 56);
     lv_obj_set_style_radius(off, 16, 0);
@@ -1043,6 +1108,38 @@ extern "C" uint32_t tud_msc_inquiry2_cb(uint8_t, scsi_inquiry_resp_t *resp, uint
     scsi_field(resp->product_id, sizeof(resp->product_id), "P4C5 microSD");
     scsi_field(resp->product_rev, sizeof(resp->product_rev), "1.0");
     return sizeof(scsi_inquiry_resp_t);
+}
+
+/* Every SCSI command but READ/WRITE(10) ends here. esp_tinyusb answers START STOP UNIT itself and drops eject
+ * when auto_mount_off is set, so the PC found the medium again a moment later and mounted it back */
+extern "C" void tud_msc_scsi_complete_cb(uint8_t, uint8_t const scsi_cmd[16])
+{
+    /* START STOP UNIT: byte 4 bit 0 START, bit 1 LOEJ */
+    if (scsi_cmd[0] == 0x1B && (scsi_cmd[4] & 0x03) == 0x02 && s_usb_on && !s_pc_ejected) {
+        s_pc_ejected = true;
+        ESP_LOGI(TAG, "eject from the PC");
+    }
+}
+
+/* After eject the medium is gone for the PC until the drive is turned on again (linked with --wrap, see
+ * CMakeLists.txt) */
+extern "C" bool __real_tud_msc_test_unit_ready_cb(uint8_t lun);
+extern "C" bool __wrap_tud_msc_test_unit_ready_cb(uint8_t lun)
+{
+    if (s_pc_ejected) {
+        tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);      /* MEDIUM NOT PRESENT */
+        return false;
+    }
+    return __real_tud_msc_test_unit_ready_cb(lun);
+}
+
+extern "C" bool tud_msc_prevent_allow_medium_removal_cb(uint8_t, uint8_t prohibit_removal, uint8_t)
+{
+    if (s_pc_lock != prohibit_removal) {
+        ESP_LOGI(TAG, "PC %s the drive", prohibit_removal ? "holds" : "released");
+    }
+    s_pc_lock = prohibit_removal ? 1 : 0;
+    return true;
 }
 
 namespace esp_brookesia::apps {
@@ -1069,6 +1166,7 @@ bool PhoneFiles::run()
     s_dir = ROOT;
     s_selected = -1;
     s_usb_msg_until = 0;
+    s_usb_off_armed_until = 0;
     build_ui();
     s_timer = lv_timer_create(on_timer, 250, nullptr);
     show_dir();
@@ -1079,8 +1177,10 @@ bool PhoneFiles::run()
 bool PhoneFiles::back()
 {
     if (s_usb_on) {
-        usb_stop();
-        show_dir();
+        if (usb_off_confirmed()) {
+            usb_stop();
+            show_dir();
+        }
         return true;
     }
     if (text_open()) {
@@ -1111,6 +1211,9 @@ bool PhoneFiles::resume()
 /* Leaving the app gives the card back to the phone */
 bool PhoneFiles::pause()
 {
+    if (usb_held_by_pc()) {
+        ESP_LOGW(TAG, "leaving the app before the PC ejected the USB drive");
+    }
     usb_stop();
     return true;
 }
