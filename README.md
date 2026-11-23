@@ -160,7 +160,7 @@ Since v0.1.0 the partition table has a `model` partition (960 KB at `0xF10000`) 
 
 - Fonts: Be Vietnam Pro (UI and clock) and Noto Sans CJK (Chinese text of the AI Assistant), SIL Open Font License 1.1, see `components/phone_app_settings/fonts/OFL.txt` and `OFL-NotoSansCJK.txt`.
 - ESP-Brookesia (`components/brookesia_core`, Calculator, 2048, Squareline demo), `esp_xiaozhi`, the EAF decoder and the local `esp_driver_sdmmc`: Apache-2.0, from Espressif.
-- The eye animations of the AI Assistant (`components/phone_app_assistant/emote/`) come from Espressif's Emote Pack, published without a license file: their license is not confirmed (see the README there).
+- The eye animations of the AI Assistant (`components/phone_app_assistant/emote/`) are taken from Espressif's "Emote Pack" (https://dl.espressif.com/AE/Emote%20Pack.zip), published by Espressif as open source sample material of `espressif2022/esp_emote_gen_player` (Apache-2.0). The pack itself has no license file.
 
 ## Version
 
