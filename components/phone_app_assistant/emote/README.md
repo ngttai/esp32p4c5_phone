@@ -9,4 +9,11 @@ confirmed.
 
 A memory card can replace any of them: `/sdcard/appdata/assistant/emote/<emotion>.eaf` (for example `happy.eaf`), or
 `pack_<name>.eaf` as named in the pack, so a folder of the pack (`eaf_466x466`, ...) can be copied as it is.
-Up to 480 x 480; other sizes are scaled into the 360 x 360 face.
+A card set that lacks a name (a set made for the 21 emotions of the protocol has no `idle`, shown while listening)
+plays the card's `neutral` instead, never a built-in face mixed into another character; the built-in set plays only
+when the card has no `neutral` either.
+
+Sizes: 360 x 360 is decoded straight into the face. Bigger ones, up to 480 x 480, are decoded aside and shrunk to
+360 once per frame (nearest pixel); scaling them in LVGL instead is done in software on every redraw. Measured with
+a 400 x 400 set: core 0 about 80% (LVGL scaling), 43% (shrunk after decoding), 28-30% for the same set made 360 x 360.
+Smaller ones are enlarged by LVGL.

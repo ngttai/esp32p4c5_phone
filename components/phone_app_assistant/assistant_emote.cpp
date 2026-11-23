@@ -61,7 +61,9 @@ const struct {
 };
 
 /* A card can bring its own faces: appdata/assistant/emote/<emotion>.eaf, else pack_<name>.eaf (a folder of the
- * Emote Pack copied as it is); any size up to MAX_SIDE, shown scaled into the SIZE square */
+ * Emote Pack copied as it is); any size up to MAX_SIDE. Bigger than SIZE: each frame is decoded aside and shrunk
+ * into SIZE once (nearest pixel), so LVGL copies the image as it is; scaling it in LVGL is done in software on every
+ * redraw (about 80% of core 0 for a 400x400 set). Smaller ones are left to LVGL to enlarge. */
 constexpr const char *SD_DIR = PHONE_SD_ASSISTANT_EMOTE;
 constexpr int MAX_SIDE = 480;
 constexpr size_t MAX_FILE = 4 * 1024 * 1024;
@@ -71,12 +73,16 @@ constexpr int SIZE = ASSISTANT_EMOTE_SIZE;
 lv_obj_t *s_img;
 lv_timer_t *s_timer;
 lv_image_dsc_t s_dsc;
-uint16_t *s_frame;
+uint16_t *s_frame;              // the image shown
 size_t s_frame_px;              // pixels s_frame holds
-int s_w, s_h;                   // size of the animation playing
+int s_w, s_h;                   // size of the animation playing (frames as decoded)
+int s_ow, s_oh;                 // size of s_frame: s_w x s_h, or shrunk to fit SIZE
+uint16_t *s_src;                // a frame decoded before it is shrunk (PSRAM), nullptr when not shrunk
+uint16_t s_sx[SIZE];            // source column of each column shown, when shrunk
 uint16_t s_background;
 eaf_dec_handle_t s_dec;
 uint8_t *s_file;                // the animation read from the card (PSRAM), or nullptr when embedded
+bool s_from_card;               // the animation playing comes from the card
 char s_emotion[32];
 int s_index, s_total;
 
@@ -100,12 +106,23 @@ void show_next()
         }
         const bool fits = header.width == s_w && header.height == s_h;
         eaf_dec_free_header(&header);
-        if (!fits || eaf_dec_decode_frame(s_dec, index, reinterpret_cast<uint8_t *>(s_frame),
+        uint16_t *out = s_src ? s_src : s_frame;
+        if (!fits || eaf_dec_decode_frame(s_dec, index, reinterpret_cast<uint8_t *>(out),
                                           static_cast<size_t>(s_w) * s_h * 2, false) != ESP_OK) {
             continue;
         }
-        const uint16_t key = s_frame[0];
-        if (key != s_background) {
+        const uint16_t key = out[0];
+        if (s_src) {
+            /* shrink and put the background in one pass */
+            uint16_t *dst = s_frame;
+            for (int y = 0; y < s_oh; y++) {
+                const uint16_t *row = s_src + static_cast<size_t>(y * s_h / s_oh) * s_w;
+                for (int x = 0; x < s_ow; x++) {
+                    const uint16_t c = row[s_sx[x]];
+                    *dst++ = c == key ? s_background : c;
+                }
+            }
+        } else if (key != s_background) {
             for (int i = 0; i < s_w * s_h; i++) {
                 if (s_frame[i] == key) {
                     s_frame[i] = s_background;
@@ -161,6 +178,8 @@ void close_animation()
     }
     heap_caps_free(s_file);
     s_file = nullptr;
+    heap_caps_free(s_src);
+    s_src = nullptr;
     s_total = 0;
 }
 
@@ -187,31 +206,51 @@ bool open_animation(const uint8_t *data, size_t size)
         s_dec = nullptr;
         return false;
     }
-    const size_t px = static_cast<size_t>(w) * h;
+    /* shrunk to SIZE on the longer side when bigger */
+    const int side = w > h ? w : h;
+    const int ow = side > SIZE ? w * SIZE / side : w, oh = side > SIZE ? h * SIZE / side : h;
+    if (side > SIZE) {
+        s_src = static_cast<uint16_t *>(heap_caps_malloc(static_cast<size_t>(w) * h * 2, MALLOC_CAP_SPIRAM));
+        if (!s_src) {
+            eaf_dec_deinit(s_dec);
+            s_dec = nullptr;
+            return false;
+        }
+        for (int x = 0; x < ow; x++) {
+            s_sx[x] = static_cast<uint16_t>(x * w / ow);
+        }
+    }
+    const size_t px = static_cast<size_t>(ow) * oh;
     if (px > s_frame_px) {
         auto *frame = static_cast<uint16_t *>(heap_caps_malloc(px * 2, MALLOC_CAP_SPIRAM));
         if (!frame) {
             eaf_dec_deinit(s_dec);
             s_dec = nullptr;
+            heap_caps_free(s_src);
+            s_src = nullptr;
             return false;
         }
         heap_caps_free(s_frame);
         s_frame = frame;
         s_frame_px = px;
     }
-    if (w != s_w || h != s_h || s_dsc.data != reinterpret_cast<const uint8_t *>(s_frame)) {
-        s_w = w;
-        s_h = h;
-        s_dsc.header.w = w;
-        s_dsc.header.h = h;
-        s_dsc.header.stride = w * 2;
+    s_w = w;
+    s_h = h;
+    if (ow != s_ow || oh != s_oh || s_dsc.data != reinterpret_cast<const uint8_t *>(s_frame)) {
+        s_ow = ow;
+        s_oh = oh;
+        s_dsc.header.w = ow;
+        s_dsc.header.h = oh;
+        s_dsc.header.stride = ow * 2;
         s_dsc.data_size = px * 2;
         s_dsc.data = reinterpret_cast<const uint8_t *>(s_frame);
         for (size_t i = 0; i < px; i++) {
             s_frame[i] = s_background;
         }
         lv_image_set_src(s_img, &s_dsc);
-        lv_image_set_scale(s_img, LV_SCALE_NONE * SIZE / (w > h ? w : h));
+        /* LV_SCALE_NONE (a plain copy) unless smaller than SIZE */
+        const int oside = ow > oh ? ow : oh;
+        lv_image_set_scale(s_img, oside < SIZE ? LV_SCALE_NONE * SIZE / oside : LV_SCALE_NONE);
     }
     return true;
 }
@@ -225,7 +264,7 @@ extern "C" lv_obj_t *assistant_emote_create(lv_obj_t *parent, uint32_t backgroun
     s_dsc = {};
     s_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
     s_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    s_w = s_h = 0;
+    s_w = s_h = s_ow = s_oh = 0;
     s_img = lv_image_create(parent);
     lv_obj_set_size(s_img, SIZE, SIZE);
     lv_image_set_inner_align(s_img, LV_IMAGE_ALIGN_CENTER);
@@ -234,6 +273,31 @@ extern "C" lv_obj_t *assistant_emote_create(lv_obj_t *parent, uint32_t backgroun
     assistant_emote_set("neutral");
     return s_img;
 }
+
+namespace {
+
+/* The card's animation of MAP[m]: <emotion>.eaf, else pack_<name>.eaf; false when neither is there or usable */
+bool open_card(int m)
+{
+    char pack[40];
+    snprintf(pack, sizeof(pack), "pack_%s", MAP[m].pack);
+    size_t size = 0;
+    s_file = read_card(MAP[m].emotion, &size);
+    if (!s_file) {
+        s_file = read_card(pack, &size);
+    }
+    if (!s_file) {
+        return false;
+    }
+    if (!open_animation(s_file, size)) {
+        ESP_LOGW(TAG, "the card's animation of \"%s\" cannot be used", MAP[m].emotion);
+        close_animation();
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 extern "C" void assistant_emote_set(const char *emotion)
 {
@@ -247,32 +311,29 @@ extern "C" void assistant_emote_set(const char *emotion)
             break;
         }
     }
-    if (strcmp(s_emotion, MAP[m].emotion) == 0 && s_dec) {
+    const bool card = card_mounted();
+    /* the same face again: kept, unless it is the built-in one and the card is there now (the app was opened
+     * while the card was not ready, or lent to a PC) */
+    if (strcmp(s_emotion, MAP[m].emotion) == 0 && s_dec && (s_from_card || !card)) {
         return;
     }
     strlcpy(s_emotion, MAP[m].emotion, sizeof(s_emotion));
     close_animation();
     s_index = 0;
 
-    bool ok = false;
-    if (card_mounted()) {
-        char pack[40];
-        snprintf(pack, sizeof(pack), "pack_%s", MAP[m].pack);
-        size_t size = 0;
-        s_file = read_card(MAP[m].emotion, &size);
-        if (!s_file) {
-            s_file = read_card(pack, &size);
-        }
-        ok = s_file && open_animation(s_file, size);
-        if (s_file && !ok) {
-            ESP_LOGW(TAG, "the card's animation of \"%s\" cannot be used: the built-in one plays", MAP[m].emotion);
-            close_animation();
-        }
+    /* A card that brings faces but not this one plays its own neutral: the built-in set is another character,
+     * mixing the two looks broken (a set made for the 21 emotions of the protocol has no "idle") */
+    int fps = MAP[m].fps;
+    s_from_card = card && open_card(m);
+    if (card && !s_from_card && m != 0 && open_card(0)) {
+        ESP_LOGI(TAG, "\"%s\" is not on the card: its \"neutral\" plays", MAP[m].emotion);
+        s_from_card = true;
+        fps = MAP[0].fps;
     }
-    if (!ok && !open_animation(MAP[m].start, MAP[m].end - MAP[m].start)) {
+    if (!s_from_card && !open_animation(MAP[m].start, MAP[m].end - MAP[m].start)) {
         ESP_LOGE(TAG, "cannot open the animation of \"%s\"", MAP[m].emotion);
     }
-    lv_timer_set_period(s_timer, 1000 / MAP[m].fps);
+    lv_timer_set_period(s_timer, 1000 / fps);
     show_next();
 }
 
@@ -283,8 +344,9 @@ extern "C" void assistant_emote_destroy(void)
     close_animation();
     s_img = nullptr;
     s_emotion[0] = '\0';
+    s_from_card = false;
     heap_caps_free(s_frame);
     s_frame = nullptr;
     s_frame_px = 0;
-    s_w = s_h = 0;
+    s_w = s_h = s_ow = s_oh = 0;
 }
