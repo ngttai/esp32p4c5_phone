@@ -696,7 +696,7 @@ PhoneUsbCamera *PhoneUsbCamera::requestInstance()
 }
 
 PhoneUsbCamera::PhoneUsbCamera():
-    App(phone_tr("Camera USB", "USB camera"), &phone_usb_camera_icon, true, true, true)
+    App(phone_tr("Camera USB", "USB camera"), &phone_usb_camera_icon, true, true, phone_nav_bar())
 {
 }
 

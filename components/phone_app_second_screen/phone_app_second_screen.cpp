@@ -765,7 +765,7 @@ PhoneSecondScreen *PhoneSecondScreen::requestInstance()
 }
 
 PhoneSecondScreen::PhoneSecondScreen():
-    App(phone_tr("Màn hình phụ", "Second screen"), &phone_second_screen_icon, true, true, true)
+    App(phone_tr("Màn hình phụ", "Second screen"), &phone_second_screen_icon, true, true, phone_nav_bar())
 {
 }
 

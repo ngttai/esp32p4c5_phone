@@ -706,7 +706,7 @@ PhoneAssistant *PhoneAssistant::requestInstance()
 }
 
 PhoneAssistant::PhoneAssistant():
-    App(phone_tr("Trợ lý AI", "AI Assistant"), &phone_assistant_icon, true, true, true)
+    App(phone_tr("Trợ lý AI", "AI Assistant"), &phone_assistant_icon, true, true, phone_nav_bar())
 {
 }
 

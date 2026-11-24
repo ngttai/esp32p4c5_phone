@@ -109,6 +109,23 @@ extern "C" void app_main(void)
             wifi_icon.images[WIFI_ICON_SEARCHING] = gui::StyleImage::IMAGE_RECOLOR(wifi_icon.images[3].resource, 0x767778);
             wifi_icon.image_num = 5;
         }
+        /* Navigation (Settings > System): the three-key bar shown by a swipe up, without the bottom hint bar; or
+         * gestures: back from the left / right edge, home and recents from the bottom edge, with their hint bars */
+        auto &gesture = stylesheet->manager.gesture;
+        using IndicatorBar = Gesture::IndicatorBarType;
+        const bool keys = phone_nav_bar();
+        gesture.flags.enable_indicator_bars[static_cast<int>(IndicatorBar::LEFT)] = keys ? 0 : 1;
+        gesture.flags.enable_indicator_bars[static_cast<int>(IndicatorBar::RIGHT)] = keys ? 0 : 1;
+        gesture.flags.enable_indicator_bars[static_cast<int>(IndicatorBar::BOTTOM)] = keys ? 0 : 1;
+        stylesheet->manager.flags.enable_gesture_navigation_back = keys ? 0 : 1;
+        if (!keys) {
+            /* back needs 100 px across instead of 50 (the edge bar grows with it), so a short edge touch does not close a page */
+            gesture.threshold.direction_horizon = 100;
+        }
+        /* the launcher too shows the three keys on a swipe up (the stylesheet hides them there: recents by gesture) */
+        stylesheet->display.navigation_bar.visual_mode = keys ? NavigationBar::VisualMode::SHOW_FLEX :
+                                                        NavigationBar::VisualMode::HIDE;
+        ESP_UTILS_LOGI("Navigation: %s", keys ? "three keys" : "gestures");
         ESP_UTILS_LOGI("Using stylesheet (%s)", stylesheet->core.name);
         ESP_UTILS_CHECK_FALSE_EXIT(phone->addStylesheet(stylesheet), "Add stylesheet failed");
         ESP_UTILS_CHECK_FALSE_EXIT(phone->activateStylesheet(stylesheet), "Activate stylesheet failed");

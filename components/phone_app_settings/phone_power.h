@@ -12,6 +12,7 @@ typedef enum {
     PHONE_POWER_OFF,               /*!< "Power off?" */
     PHONE_POWER_RESTART,           /*!< "Restart?" */
     PHONE_POWER_RESTART_LANG,      /*!< "Restart to apply language?" */
+    PHONE_POWER_RESTART_NAV,       /*!< "Restart to apply the navigation?" */
 } phone_power_action_t;
 
 /**

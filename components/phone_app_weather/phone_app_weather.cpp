@@ -700,7 +700,7 @@ PhoneWeather *PhoneWeather::requestInstance()
 }
 
 PhoneWeather::PhoneWeather():
-    App(phone_tr("Thời tiết", "Weather"), &phone_weather_icon, true, true, true)
+    App(phone_tr("Thời tiết", "Weather"), &phone_weather_icon, true, true, phone_nav_bar())
 {
 }
 

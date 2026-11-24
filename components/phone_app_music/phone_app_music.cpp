@@ -1641,7 +1641,7 @@ PhoneMusic *PhoneMusic::requestInstance()
 }
 
 PhoneMusic::PhoneMusic():
-    App(phone_tr("Nhạc", "Music"), &phone_music_icon, true, true, true)
+    App(phone_tr("Nhạc", "Music"), &phone_music_icon, true, true, phone_nav_bar())
 {
 }
 

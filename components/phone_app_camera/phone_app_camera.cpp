@@ -557,7 +557,7 @@ PhoneCamera *PhoneCamera::requestInstance()
 }
 
 PhoneCamera::PhoneCamera():
-    App(phone_tr("Máy ảnh", "Camera"), &phone_camera_icon, true, true, true)
+    App(phone_tr("Máy ảnh", "Camera"), &phone_camera_icon, true, true, phone_nav_bar())
 {
 }
 

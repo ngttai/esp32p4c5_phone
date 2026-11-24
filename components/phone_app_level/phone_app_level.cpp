@@ -306,7 +306,7 @@ PhoneLevel *PhoneLevel::requestInstance()
 }
 
 PhoneLevel::PhoneLevel():
-    App(phone_tr("Thước thủy", "Level"), &phone_level_icon, true, true, true)
+    App(phone_tr("Thước thủy", "Level"), &phone_level_icon, true, true, phone_nav_bar())
 {
 }
 

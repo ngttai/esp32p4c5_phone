@@ -1153,7 +1153,7 @@ PhoneFiles *PhoneFiles::requestInstance()
 }
 
 PhoneFiles::PhoneFiles():
-    App(phone_tr("Tệp", "Files"), &phone_files_icon, true, true, true)
+    App(phone_tr("Tệp", "Files"), &phone_files_icon, true, true, phone_nav_bar())
 {
 }
 

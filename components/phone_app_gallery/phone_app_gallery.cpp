@@ -611,7 +611,7 @@ PhoneGallery *PhoneGallery::requestInstance()
 }
 
 PhoneGallery::PhoneGallery():
-    App(phone_tr("Thư viện ảnh", "Gallery"), &phone_gallery_icon, true, true, true)
+    App(phone_tr("Thư viện ảnh", "Gallery"), &phone_gallery_icon, true, true, phone_nav_bar())
 {
 }
 

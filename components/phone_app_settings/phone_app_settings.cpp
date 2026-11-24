@@ -66,6 +66,7 @@ enum Page {
     PAGE_MEM,
     PAGE_CELL,
     PAGE_CELLULAR,
+    PAGE_NAV,
     PAGE_COUNT,
 };
 
@@ -97,6 +98,8 @@ lv_obj_t *s_c5_ver_val;
 lv_obj_t *s_sd_val;
 lv_obj_t *s_to_check[8];
 lv_obj_t *s_batt_vals[6];
+lv_obj_t *s_nav_check[2];       // System > Navigation: three keys, gestures
+lv_obj_t *s_nav_val;            // value of the Navigation row on the main page
 lv_obj_t *s_bri_val;
 lv_obj_t *s_bri_slider;
 lv_obj_t *s_vol_val;
@@ -494,13 +497,19 @@ void add_tile(lv_obj_t *row, const char *symbol, uint32_t tile_color)
     lv_obj_move_to_index(left, 0);
 }
 
-void group_row(lv_obj_t *card, const char *symbol, uint32_t tile_color, const char *text, const char *value, int page)
+const char *nav_mode_name()
+{
+    return phone_nav_bar() ? phone_tr("3 phím", "Three keys") : phone_tr("Cử chỉ", "Gestures");
+}
+
+lv_obj_t *group_row(lv_obj_t *card, const char *symbol, uint32_t tile_color, const char *text, const char *value, int page)
 {
     lv_obj_t *row = grouped_row(card, text, on_open_page, reinterpret_cast<void *>(static_cast<intptr_t>(page)));
     add_tile(row, symbol, tile_color);
     lv_obj_t *r = lv_label_create(row);
     lv_label_set_text_fmt(r, "%s  " LV_SYMBOL_RIGHT, value ? value : "");
     lv_obj_set_style_text_color(r, lv_color_hex(COLOR_SUB), 0);
+    return r;
 }
 
 lv_obj_t *kv_row(lv_obj_t *card, const char *key)
@@ -1840,6 +1849,7 @@ void build_ui()
     group_row(g, kIconGlobe, 0x9B51E0, T("Ngôn ngữ", "Language"), phone_lang_get() == PHONE_LANG_VI ? "Tiếng Việt" : "English", PAGE_LANG);
     group_row(g, LV_SYMBOL_GPS, 0x2D9CDB, T("Múi giờ", "Time zone"), nullptr, PAGE_TZ);
     group_row(g, LV_SYMBOL_POWER, 0xE5484D, T("Nguồn", "Power"), nullptr, PAGE_POWER);
+    s_nav_val = group_row(g, LV_SYMBOL_HOME, 0x2F80ED, T("Điều hướng", "Navigation"), nav_mode_name(), PAGE_NAV);
     group_end(g);
 
     g = make_group(main_page, T("Thông tin", "Info"));
@@ -1987,6 +1997,36 @@ void build_ui()
         lv_slider_set_value(s_vol_slider, 0, LV_ANIM_OFF);
         lv_label_set_text(s_vol_val, T("Tắt tiếng", "Muted"));
     }
+    /* Navigation: applied at the next boot (each app takes its navigation bar mode when it is installed) */
+    lv_obj_t *navp = make_page(root, T("Điều hướng", "Navigation"), PAGE_NAV);
+    lv_obj_t *nav = make_group(navp, T("Cách điều hướng", "Navigation mode"));
+    static const char *const nav_vi[] = {"3 phím", "Cử chỉ"};
+    static const char *const nav_en[] = {"Three keys", "Gestures"};
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *row = grouped_row(nav, T(nav_vi[i], nav_en[i]), [](lv_event_t *e) {
+            const bool bar = reinterpret_cast<intptr_t>(lv_event_get_user_data(e)) == 0;
+            for (int k = 0; k < 2; k++) {
+                lv_label_set_text(s_nav_check[k], (k == 0) == bar ? LV_SYMBOL_OK : "");
+            }
+            if (bar != phone_nav_bar()) {
+                phone_nav_set_bar(bar);
+                lv_label_set_text_fmt(s_nav_val, "%s  " LV_SYMBOL_RIGHT, nav_mode_name());
+                phone_power_confirm(PHONE_POWER_RESTART_NAV);
+            }
+        }, reinterpret_cast<void *>(static_cast<intptr_t>(i)));
+        s_nav_check[i] = lv_label_create(row);
+        lv_obj_set_style_text_color(s_nav_check[i], lv_color_hex(COLOR_ACCENT), 0);
+        lv_label_set_text(s_nav_check[i], (i == 0) == phone_nav_bar() ? LV_SYMBOL_OK : "");
+    }
+    group_end(nav);
+    lv_obj_t *nav_note = make_text(navp,
+                                   T("3 phím: vuốt lên từ cạnh dưới để hiện Quay lại, Màn hình chính, Ứng dụng gần đây. "
+                                     "Cử chỉ: vuốt từ mép trái hoặc phải để quay lại, vuốt nhanh lên từ cạnh dưới về màn "
+                                     "hình chính, vuốt lên rồi giữ để mở ứng dụng gần đây. Đổi xong cần khởi động lại.",
+                                     "Three keys: swipe up from the bottom edge for Back, Home and Recents. Gestures: swipe "
+                                     "from the left or right edge to go back, swipe up quickly from the bottom edge for "
+                                     "home, swipe up and hold for recents. Takes effect after a restart."), COLOR_SUB);
+    lv_obj_set_style_pad_hor(nav_note, 12, 0);
     lv_obj_t *lang = make_page(root, T("Ngôn ngữ", "Language"), PAGE_LANG);
     const char *lang_names[2] = {"Tiếng Việt", "English"};
     for (int i = 0; i < 2; i++) {
@@ -2082,7 +2122,7 @@ PhoneSettings *PhoneSettings::requestInstance()
 }
 
 PhoneSettings::PhoneSettings():
-    App(phone_tr("Cài đặt", "Settings"), &phone_settings_icon, true, true, true)
+    App(phone_tr("Cài đặt", "Settings"), &phone_settings_icon, true, true, phone_nav_bar())
 {
 }
 

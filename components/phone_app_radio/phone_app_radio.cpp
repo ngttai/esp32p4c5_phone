@@ -524,7 +524,7 @@ PhoneRadio *PhoneRadio::requestInstance()
 }
 
 PhoneRadio::PhoneRadio():
-    App(phone_tr("Radio", "Radio"), &phone_radio_icon, true, true, true)
+    App(phone_tr("Radio", "Radio"), &phone_radio_icon, true, true, phone_nav_bar())
 {
 }
 

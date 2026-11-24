@@ -21,6 +21,11 @@ const char *phone_tz_label(int idx);
 int phone_tz_get(void);
 void phone_tz_set(int idx);
 
+/** Navigation (NVS key "nav_mode", applied at boot): true = the three-key navigation bar (swipe up shows it, default),
+ * false = gestures (swipe from the left / right edge: back; quick swipe up: home; swipe up and hold: recents). */
+bool phone_nav_bar(void);
+void phone_nav_set_bar(bool bar);
+
 /** Persistent small integer setting in NVS. */
 int phone_pref_get(const char *key, int def);
 void phone_pref_set(const char *key, int value);

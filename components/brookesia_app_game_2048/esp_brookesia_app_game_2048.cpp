@@ -15,6 +15,7 @@
 #include "esp_lib_utils.h"
 #include "esp_brookesia_app_game_2048.hpp"
 #include "phone_lock.h"
+#include "phone_locale.h"
 
 using namespace esp_brookesia::systems::phone;
 
@@ -70,11 +71,10 @@ constexpr systems::base::App::Config CORE_DATA = {
         .enable_resize_visual_area = 1,
     },
 };
-/* Phone app with the status bar and the navigation bar */
-constexpr App::Config APP_DATA = App::Config::SIMPLE_CONSTRUCTOR(nullptr, true, true);
 
 Game2048::Game2048()
-    : App(CORE_DATA, APP_DATA)
+    /* the status bar, and the navigation bar unless the phone uses gestures */
+    : App(CORE_DATA, App::Config::SIMPLE_CONSTRUCTOR(nullptr, true, phone_nav_bar()))
 {
 }
 

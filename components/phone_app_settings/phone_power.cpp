@@ -150,6 +150,8 @@ void show_menu(phone_power_action_t action)
         title_text = phone_tr("Khởi động lại?", "Restart?");
     } else if (action == PHONE_POWER_RESTART_LANG) {
         title_text = phone_tr("Khởi động lại để áp dụng ngôn ngữ?", "Restart to apply language?");
+    } else if (action == PHONE_POWER_RESTART_NAV) {
+        title_text = phone_tr("Khởi động lại để áp dụng cách điều hướng?", "Restart to apply the navigation?");
     }
     lv_label_set_text(title, title_text);
     lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
@@ -163,7 +165,8 @@ void show_menu(phone_power_action_t action)
     if (action != PHONE_POWER_OFF) {
         add_button(card, phone_tr("Khởi động lại", "Restart"), COLOR_RESTART, on_restart);
     }
-    add_button(card, action == PHONE_POWER_RESTART_LANG ? phone_tr("Để sau", "Later") : phone_tr("Hủy", "Cancel"), COLOR_CANCEL, on_cancel);
+    const bool later = action == PHONE_POWER_RESTART_LANG || action == PHONE_POWER_RESTART_NAV;
+    add_button(card, later ? phone_tr("Để sau", "Later") : phone_tr("Hủy", "Cancel"), COLOR_CANCEL, on_cancel);
 }
 
 void poll_task(void *)

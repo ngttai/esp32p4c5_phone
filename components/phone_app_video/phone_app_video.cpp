@@ -1603,7 +1603,7 @@ PhoneVideo *PhoneVideo::requestInstance()
 }
 
 PhoneVideo::PhoneVideo():
-    App("Video", &phone_video_icon, true, true, true)
+    App("Video", &phone_video_icon, true, true, phone_nav_bar())
 {
 }
 

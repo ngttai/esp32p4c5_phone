@@ -49,7 +49,7 @@ namespace esp_brookesia::apps {
 
 /* Phone app with the default screen, the status bar and the navigation bar */
 Calculator::Calculator():
-    App(phone_tr("Máy tính", "Calculator"), &img_app_calculator, true, true, true)
+    App(phone_tr("Máy tính", "Calculator"), &img_app_calculator, true, true, phone_nav_bar())
 {
 }
 

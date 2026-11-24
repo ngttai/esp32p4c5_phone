@@ -130,3 +130,13 @@ extern "C" void phone_pref_set(const char *key, int value)
 {
     save_u8(key, static_cast<uint8_t>(value));
 }
+
+extern "C" bool phone_nav_bar(void)
+{
+    return phone_pref_get("nav_mode", 0) == 0;
+}
+
+extern "C" void phone_nav_set_bar(bool bar)
+{
+    phone_pref_set("nav_mode", bar ? 0 : 1);
+}
