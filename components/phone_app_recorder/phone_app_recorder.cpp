@@ -33,6 +33,7 @@
 #include "esp_lib_utils.h"
 #include "phone_audio.h"
 #include "phone_fonts.h"
+#include "phone_led.h"
 #include "phone_locale.h"
 #include "phone_paths.h"
 #include "phone_storage.h"
@@ -217,6 +218,11 @@ void rec_task(void *)
         }
         ESP_LOGI(TAG, "recording %s", s_rec_path);
     }
+    if (error == REC_OK) {
+        /* the LED blinks red while recording: seen from the home screen and with the screen off */
+        const phone_led_pattern_t blink = {PHONE_LED_BLINK, 0xFF0000, 2000, 120};
+        phone_led_request(HOLD_NAME, PHONE_LED_ALERT, &blink);
+    }
     uint32_t last_header = xTaskGetTickCount();
     int64_t free_left = card_free();
     while (error == REC_OK && !s_rec_stop) {
@@ -262,6 +268,7 @@ void rec_task(void *)
         ESP_LOGI(TAG, "recorded %lu s, %s", static_cast<unsigned long>(bytes / BYTES_PER_SEC),
                  error == REC_OK ? "ok" : "ended early");
     }
+    phone_led_release(HOLD_NAME);
     if (mic_open) {
         esp_codec_dev_close(mic);
     }
