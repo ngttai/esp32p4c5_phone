@@ -155,7 +155,7 @@ const lv_image_dsc_t *ui_imgset_chatbox[1] = {&ui_img_chatbox2_png};
 const lv_image_dsc_t *ui_imgset_weather_[3] = {&ui_img_weather_1_png, &ui_img_weather_2_png, &ui_img_weather_3_png};
 
 ///////////////////// TEST LVGL SETTINGS ////////////////////
-#if LV_COLOR_DEPTH != 16
+#if LV_COLOR_DEPTH != 16 && LV_COLOR_DEPTH != 24
 #error "LV_COLOR_DEPTH should be 16bit to match SquareLine Studio's settings"
 #endif
 
