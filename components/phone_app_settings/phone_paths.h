@@ -20,6 +20,7 @@
 /* media */
 #define PHONE_SD_DCIM               PHONE_SD_ROOT "/DCIM"
 #define PHONE_SD_MUSIC              PHONE_SD_ROOT "/Music"
+#define PHONE_SD_RECORDINGS         PHONE_SD_ROOT "/Recordings"
 
 /* app data */
 #define PHONE_SD_APPDATA            PHONE_SD_ROOT "/appdata"
