@@ -158,12 +158,13 @@ void refresh(lv_timer_t *)
         lv_label_set_text(s_cell_sub, phone_cell_state_text(cell ? ci.state : PHONE_CELL_OFF));
     }
 
-    /* Mobile data: dim while 4G is off */
-    const bool cdata = phone_cell_data_enabled();
-    lv_obj_set_style_bg_color(s_cdata_tile, lv_color_hex(cell && cdata ? COLOR_TILE_ON : COLOR_TILE), 0);
-    lv_obj_set_style_opa(s_cdata_tile, cell ? LV_OPA_COVER : LV_OPA_50, 0);
-    lv_label_set_text(s_cdata_sub, !cell ? T("Cần bật 4G", "Turn 4G on") : !cdata ? T("Tắt", "Off")
-                      : phone_cell_data_text(ci.data));
+    /* Mobile data: dim until 4G is ready (registered) */
+    const bool usable = cell && phone_cell_ready(&ci);
+    const bool cdata = usable && phone_cell_data_enabled();
+    lv_obj_set_style_bg_color(s_cdata_tile, lv_color_hex(cdata ? COLOR_TILE_ON : COLOR_TILE), 0);
+    lv_obj_set_style_opa(s_cdata_tile, usable ? LV_OPA_COVER : LV_OPA_50, 0);
+    lv_label_set_text(s_cdata_sub, !cell ? T("Cần bật 4G", "Turn 4G on") : !usable ? phone_cell_state_text(ci.state)
+                      : !cdata ? T("Tắt", "Off") : phone_cell_data_text(ci.data));
 
     /* Mute and the sliders follow the volume keys and Settings */
     const bool muted = phone_pref_get("mute", 0) != 0;
@@ -234,7 +235,9 @@ void on_cdata(lv_event_t *e)
         open_settings(Open::CELL);
         return;
     }
-    if (phone_cell_is_enabled()) {
+    phone_cell_info_t ci;
+    phone_cell_get(&ci);
+    if (phone_cell_is_enabled() && phone_cell_ready(&ci)) {
         phone_cell_set_data(!phone_cell_data_enabled());
     }
     refresh(nullptr);

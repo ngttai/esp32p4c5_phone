@@ -72,6 +72,9 @@ void phone_cell_wifi_changed(void);
  * reset (0 when the clock was not set then) */
 void phone_cell_data_usage(unsigned long long *rx, unsigned long long *tx, long long *since);
 void phone_cell_data_usage_reset(void);
+/** 4G is ready (registered on a network): only then the mobile data switch lights up and can be changed; before
+ * that it shows off and the saved choice is kept */
+bool phone_cell_ready(const phone_cell_info_t *info);
 /** Short state text for a tile or a row, in the phone language */
 const char *phone_cell_state_text(phone_cell_state_t state);
 /**

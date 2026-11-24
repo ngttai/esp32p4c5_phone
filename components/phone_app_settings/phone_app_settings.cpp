@@ -527,6 +527,9 @@ lv_obj_t *switch_row(lv_obj_t *card, const char *text, bool on, lv_event_cb_t cb
     lv_obj_remove_flag(row, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *sw = lv_switch_create(row);
     lv_obj_set_style_bg_color(sw, lv_color_hex(COLOR_ACCENT), static_cast<lv_style_selector_t>(LV_PART_INDICATOR) | static_cast<lv_style_selector_t>(LV_STATE_CHECKED));
+    /* disabled while on: grey instead of the accent, so a choice that waits for something still shows */
+    lv_obj_set_style_bg_color(sw, lv_color_hex(0x5A5A5E), static_cast<lv_style_selector_t>(LV_PART_INDICATOR) |
+                              static_cast<lv_style_selector_t>(LV_STATE_CHECKED) | static_cast<lv_style_selector_t>(LV_STATE_DISABLED));
     if (on) {
         lv_obj_add_state(sw, LV_STATE_CHECKED);
     }
@@ -1289,6 +1292,10 @@ void cellular_refresh()
             lv_obj_remove_state(s_cellular_sw, LV_STATE_CHECKED);
         }
     }
+    phone_cell_info_t ci;
+    phone_cell_get(&ci);
+    /* until 4G is ready (registered) the switch is disabled: the saved choice stays shown, greyed */
+    const bool usable = on && phone_cell_ready(&ci);
     const bool data = phone_cell_data_enabled();
     if (lv_obj_has_state(s_cdata_sw, LV_STATE_CHECKED) != data) {
         if (data) {
@@ -1297,15 +1304,13 @@ void cellular_refresh()
             lv_obj_remove_state(s_cdata_sw, LV_STATE_CHECKED);
         }
     }
-    if (lv_obj_has_state(s_cdata_sw, LV_STATE_DISABLED) == on) {
-        if (on) {
+    if (lv_obj_has_state(s_cdata_sw, LV_STATE_DISABLED) == usable) {
+        if (usable) {
             lv_obj_remove_state(s_cdata_sw, LV_STATE_DISABLED);
         } else {
             lv_obj_add_state(s_cdata_sw, LV_STATE_DISABLED);
         }
     }
-    phone_cell_info_t ci;
-    phone_cell_get(&ci);
     char buf[96];
     set_text_if_changed(s_cellular_vals[CR_DATA], on ? phone_cell_data_text(ci.data) : phone_cell_data_text(PHONE_CELL_DATA_OFF));
     set_text_if_changed(s_cellular_vals[CR_DATA_IP], ci.data_ip[0] ? ci.data_ip : "--");

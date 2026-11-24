@@ -904,3 +904,8 @@ extern "C" esp_err_t __wrap_esp_netif_receive(esp_netif_t *esp_netif, void *buff
     }
     return __real_esp_netif_receive(esp_netif, buffer, len, eb);
 }
+
+extern "C" bool phone_cell_ready(const phone_cell_info_t *info)
+{
+    return info->state == PHONE_CELL_REGISTERED;
+}
