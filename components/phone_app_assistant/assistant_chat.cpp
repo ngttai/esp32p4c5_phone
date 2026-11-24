@@ -50,6 +50,7 @@ constexpr int FRAME_MS = 60;
 constexpr int FRAME_SAMPLES = RATE * FRAME_MS / 1000;
 constexpr int OPUS_BITRATE = 24000;
 constexpr float MIC_GAIN_DB = 30.0f;
+constexpr float REF_GAIN_DB = 12.0f;     // MIC3, the looped back speaker signal (line level)
 constexpr int AUDIO_QUEUE_LEN = 80;         // about 5 s of answer waiting to be played
 constexpr size_t PCM_BYTES = 8192;          // one decoded packet (up to 120 ms at 16 kHz, with room)
 
@@ -93,6 +94,8 @@ bool s_wake_want = true, s_barge_want = true;   // the switches, as they are now
 int16_t *s_wake_buf;
 bool s_afe_on;                              // saying the wake word over the answer interrupts it (esp-sr front-end)
 int16_t *s_ref_buf;                         // what the speaker played during the last microphone frame
+int16_t *s_frames;                          // microphone frames as read: BSP_MIC_FRAME_SLOTS int16 each (PSRAM)
+int32_t *s_spk32;                           // speaker samples widened to the shared frame (PSRAM)
 int16_t *s_acc_mic, *s_acc_ref;             // microphone and reference waiting for a full front-end chunk
 int s_acc_n;
 void *s_enc;
@@ -279,6 +282,42 @@ void ref_take(int16_t *out, int n)
     taskEXIT_CRITICAL(&s_ref_mux);
 }
 
+/*
+ * The microphone frame holds both microphones and MIC3, the speaker signal looped back in hardware: the echo
+ * reference comes sample-aligned with the microphone (no software timeline, no delay to measure). While the
+ * microphone is open the speaker shares its frame (BSP_MIC_CHANNELS x BSP_MIC_BITS): mono PCM goes out widened.
+ */
+bool mic_read(int16_t *mic, int16_t *ref, int n)
+{
+    for (int done = 0; done < n;) {
+        const int k = std::min(n - done, FRAME_SAMPLES);
+        if (esp_codec_dev_read(s_mic, s_frames, k * BSP_MIC_FRAME_SLOTS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+            return false;
+        }
+        for (int i = 0; i < k; i++) {
+            const int16_t *fr = s_frames + i * BSP_MIC_FRAME_SLOTS;
+            mic[done + i] = static_cast<int16_t>((fr[BSP_MIC_SLOT_MIC1] + fr[BSP_MIC_SLOT_MIC2]) / 2);
+            if (ref) {
+                ref[done + i] = fr[BSP_MIC_SLOT_REF];
+            }
+        }
+        done += k;
+    }
+    return true;
+}
+
+void spk_write(const int16_t *pcm, int n)
+{
+    for (int done = 0; done < n;) {
+        const int k = std::min(n - done, FRAME_SAMPLES);
+        for (int i = 0; i < k; i++) {
+            s_spk32[i * 2] = s_spk32[i * 2 + 1] = static_cast<int32_t>(pcm[done + i]) << 16;
+        }
+        esp_codec_dev_write(s_spk, s_spk32, k * 2 * sizeof(int32_t));
+        done += k;
+    }
+}
+
 void play_task(void *)
 {
     esp_opus_dec_cfg_t cfg = {};
@@ -314,8 +353,7 @@ void play_task(void *)
                         volume = v;
                         esp_codec_dev_set_out_vol(s_spk, v);
                     }
-                    ref_put(reinterpret_cast<const int16_t *>(pcm), out.decoded_size / sizeof(int16_t));
-                    esp_codec_dev_write(s_spk, pcm, out.decoded_size);
+                    spk_write(reinterpret_cast<const int16_t *>(pcm), out.decoded_size / sizeof(int16_t));
                 } else {
                     volume = -1;
                 }
@@ -365,8 +403,8 @@ bool open_codecs()
     }
     esp_codec_dev_sample_info_t fs = {};
     fs.sample_rate = RATE;
-    fs.channel = 1;
-    fs.bits_per_sample = 16;
+    fs.channel = BSP_MIC_CHANNELS;          /* the frame shared with the microphone, see mic_read() */
+    fs.bits_per_sample = BSP_MIC_BITS;
     xSemaphoreTake(s_spk_lock, portMAX_DELAY);
     s_spk_open = esp_codec_dev_open(s_spk, &fs) == ESP_CODEC_DEV_OK;
     if (s_spk_open) {
@@ -378,6 +416,7 @@ bool open_codecs()
         s_mic_open = s_mic && esp_codec_dev_open(s_mic, &fs) == ESP_CODEC_DEV_OK;
         if (s_mic_open) {
             esp_codec_dev_set_in_gain(s_mic, MIC_GAIN_DB);
+            esp_codec_dev_set_in_channel_gain(s_mic, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2), REF_GAIN_DB);
         }
     }
     if (!s_spk_open || !s_mic_open) {
@@ -484,11 +523,10 @@ void barge_in_feed()
 /* One microphone frame: sent while listening, dropped otherwise (the clock keeps running) */
 void pump_microphone()
 {
-    if (esp_codec_dev_read(s_mic, s_mic_buf, FRAME_SAMPLES * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+    if (!mic_read(s_mic_buf, s_ref_buf, FRAME_SAMPLES)) {
         vTaskDelay(pdMS_TO_TICKS(20));
         return;
     }
-    ref_take(s_ref_buf, FRAME_SAMPLES);
     if (s_state == ASSISTANT_CHAT_SPEAKING) {
         if (s_afe_on && s_barge_want) {
             barge_in_feed();
@@ -704,11 +742,12 @@ bool wake_mic_open()
     s_mic = bsp_audio_codec_microphone_init();
     esp_codec_dev_sample_info_t fs = {};
     fs.sample_rate = RATE;
-    fs.channel = 1;
-    fs.bits_per_sample = 16;
+    fs.channel = BSP_MIC_CHANNELS;
+    fs.bits_per_sample = BSP_MIC_BITS;
     s_mic_open = s_mic && esp_codec_dev_open(s_mic, &fs) == ESP_CODEC_DEV_OK;
     if (s_mic_open) {
         esp_codec_dev_set_in_gain(s_mic, MIC_GAIN_DB);
+        esp_codec_dev_set_in_channel_gain(s_mic, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(2), REF_GAIN_DB);
     }
     return s_mic_open;
 }
@@ -731,7 +770,7 @@ void wake_pump()
         return;
     }
     const int n = assistant_wake_chunk();
-    if (esp_codec_dev_read(s_mic, s_wake_buf, n * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
+    if (!mic_read(s_wake_buf, nullptr, n)) {
         vTaskDelay(pdMS_TO_TICKS(20));
         return;
     }
@@ -771,8 +810,8 @@ void options_open()
             s_afe_on = s_acc_mic && s_acc_ref;
         }
     }
-    ESP_LOGI(TAG, "options: wake word %s, barge-in %s (echo delay %d samples)", s_wake ? "on" : "off",
-             s_afe_on ? "on" : "off", s_ref_delay);
+    ESP_LOGI(TAG, "options: wake word %s, barge-in %s (echo reference: MIC3)", s_wake ? "on" : "off",
+             s_afe_on ? "on" : "off");
 }
 
 void options_close()
@@ -831,6 +870,8 @@ void session_task(void *)
     s_connected = false;
     s_state = ok ? ASSISTANT_CHAT_CONNECTING : ASSISTANT_CHAT_ERROR;
     s_ref_buf = static_cast<int16_t *>(heap_caps_calloc(FRAME_SAMPLES, sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    s_frames = static_cast<int16_t *>(heap_caps_calloc(FRAME_SAMPLES * BSP_MIC_FRAME_SLOTS, sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    s_spk32 = static_cast<int32_t *>(heap_caps_calloc(FRAME_SAMPLES * 2, sizeof(int32_t), MALLOC_CAP_SPIRAM));
     if (ok) {
         options_open();
     }
@@ -852,11 +893,9 @@ void session_task(void *)
                 ESP_LOGI(TAG, "switches: wake word %d, barge-in %d", s_wake_want, s_barge_want);
                 break;
             case CMD_CALIBRATE:
-                if (s_talking) {
-                    push_msg(ASSISTANT_CHAT_MSG_NOTICE, T("Kết thúc hội thoại rồi đo", "End the conversation first"));
-                } else {
-                    s_calibrate = true;
-                }
+                /* the echo reference now comes from the hardware (MIC3), aligned with the microphone */
+                push_msg(ASSISTANT_CHAT_MSG_NOTICE, T("Không cần đo: tiếng vọng được lấy trực tiếp từ loa",
+                                                      "Not needed: the echo is taken straight from the speaker"));
                 break;
             case CMD_CONNECTED:
                 s_connected = true;
@@ -979,6 +1018,10 @@ void session_task(void *)
     options_close();
     heap_caps_free(s_ref_buf);
     s_ref_buf = nullptr;
+    heap_caps_free(s_frames);
+    s_frames = nullptr;
+    heap_caps_free(s_spk32);
+    s_spk32 = nullptr;
     free(s_mic_buf);
     s_enc_buf = nullptr;
     s_mic_buf = nullptr;

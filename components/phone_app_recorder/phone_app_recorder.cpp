@@ -1,5 +1,5 @@
 /*
- * Recorder app: records the microphones to WAV files (16 kHz, mono, 16 bit) in /sdcard/Recordings and plays
+ * Recorder app: records the two microphones, mixed, to WAV files (16 kHz, mono, 16 bit) in /sdcard/Recordings and plays
  * them back. Recording goes on behind the lock screen, with the screen off and from the home screen; closing
  * the app ends it and keeps the file. The WAV header is written again every few seconds, so a file cut by a
  * reset or a full card still plays up to there.
@@ -53,12 +53,14 @@ constexpr const char *TAG = "recorder";
 constexpr const char *HOLD_NAME = "Recorder";
 constexpr const char *REC_DIR = PHONE_SD_RECORDINGS;
 
-constexpr int RATE = 16000;
-constexpr int BYTES_PER_SEC = RATE * 2;
-constexpr int CHUNK_SAMPLES = RATE / 20;            // 50 ms: one bar of the wave
+/* Settings (NVS, applied to the next recording): channels "rec_ch" (0 mono: both microphones mixed, 1 stereo:
+ * MIC1 left, MIC2 right), sample rate "rec_rate" (index in RATES), microphone gain "rec_gain" (index in GAINS) */
+constexpr int RATES[] = {16000, 32000, 48000};
+constexpr float GAINS[] = {24.0f, 30.0f, 36.0f};
+constexpr int CHUNKS_PER_SEC = 20;                  // 50 ms: one bar of the wave
+constexpr int MAX_CHUNK = 48000 / CHUNKS_PER_SEC;   // frames of the longest chunk
 constexpr size_t WRITE_SIZE = 32 * 1024;            // bytes gathered before a write to the card
 constexpr uint32_t HEADER_EVERY_MS = 5000;          // WAV header written again (sizes so far)
-constexpr float MIC_GAIN_DB = 30.0f;
 constexpr int64_t MIN_FREE = 4 * 1024 * 1024;       // stop before the card is completely full
 
 constexpr uint32_t COLOR_BG = 0x101418;
@@ -81,6 +83,7 @@ constexpr int BUTTON_D = 96;
 std::atomic<bool> s_recording;          // the recorder task runs
 std::atomic<bool> s_rec_stop;           // asks it to end
 std::atomic<uint32_t> s_rec_bytes;      // PCM bytes written so far
+std::atomic<uint32_t> s_rec_byte_rate{32000};   // bytes per second of the recording running
 std::atomic<int> s_rec_error;           // 0, or why it ended early (REC_ERR_*)
 enum { REC_OK, REC_ERR_MIC, REC_ERR_FILE, REC_ERR_FULL, REC_ERR_WRITE };
 
@@ -97,12 +100,37 @@ std::atomic<uint32_t> s_peak_count;
 
 char s_rec_path[96];
 char s_play_path[96];
+int s_play_rate;                        // format of the file playing (set before the player starts)
+int s_play_ch;
+
+int pref_channels()
+{
+    return phone_pref_get("rec_ch", 0) == 1 ? 2 : 1;
+}
+
+int pref_rate()
+{
+    const int i = phone_pref_get("rec_rate", 0);
+    return RATES[i >= 0 && i < 3 ? i : 0];
+}
+
+float pref_gain()
+{
+    const int i = phone_pref_get("rec_gain", 1);
+    return GAINS[i >= 0 && i < 3 ? i : 1];
+}
 
 /* ---------- LVGL side ---------- */
 
 struct Entry {
     std::string name;       // file name
     uint32_t bytes;         // PCM bytes
+    int rate;
+    int channels;
+    uint32_t byte_rate() const
+    {
+        return static_cast<uint32_t>(rate) * channels * 2;
+    }
 };
 
 lv_obj_t *s_root;
@@ -122,12 +150,8 @@ uint32_t s_del_armed_until;
 bool s_was_recording;
 bool s_was_playing;
 
-void put_peak(const int16_t *pcm, int n)
+void put_level(int peak)
 {
-    int peak = 0;
-    for (int i = 0; i < n; i++) {
-        peak = std::max(peak, std::abs(static_cast<int>(pcm[i])));
-    }
     /* about a log scale: quiet speech still moves the bars */
     int level = 0;
     for (int v = peak; v > 64 && level < 100; v = v * 7 / 8) {
@@ -138,6 +162,15 @@ void put_peak(const int16_t *pcm, int n)
     s_peak_count = i + 1;
 }
 
+void put_peak(const int16_t *pcm, int n)
+{
+    int peak = 0;
+    for (int i = 0; i < n; i++) {
+        peak = std::max(peak, std::abs(static_cast<int>(pcm[i])));
+    }
+    put_level(peak);
+}
+
 void clear_peaks()
 {
     for (auto &p : s_peaks) {
@@ -146,7 +179,7 @@ void clear_peaks()
     s_peak_count = 0;
 }
 
-void wav_header(uint8_t *h, uint32_t data_bytes)
+void wav_header(uint8_t *h, uint32_t data_bytes, int rate, int channels)
 {
     auto put32 = [](uint8_t *p, uint32_t v) {
         p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
@@ -159,24 +192,43 @@ void wav_header(uint8_t *h, uint32_t data_bytes)
     memcpy(h + 8, "WAVEfmt ", 8);
     put32(h + 16, 16);
     put16(h + 20, 1);               // PCM
-    put16(h + 22, 1);               // mono
-    put32(h + 24, RATE);
-    put32(h + 28, BYTES_PER_SEC);
-    put16(h + 32, 2);
+    put16(h + 22, channels);
+    put32(h + 24, rate);
+    put32(h + 28, rate * channels * 2);
+    put16(h + 32, channels * 2);
     put16(h + 34, 16);
     memcpy(h + 36, "data", 4);
     put32(h + 40, data_bytes);
 }
 
-/* Data bytes of one of our WAV files (44-byte header); from the file size when the header was not
- * written at the end (a reset during the recording) */
-uint32_t wav_bytes(const char *path)
+/* One of our WAV files (44-byte header): rate and channels from the header, data bytes from the file size
+ * (also right when the header was not written at the end: a reset during the recording) */
+bool wav_info(const char *path, uint32_t *bytes, int *rate, int *channels)
 {
-    struct stat st;
-    if (stat(path, &st) != 0 || st.st_size <= 44) {
-        return 0;
+    *bytes = 0;
+    *rate = 16000;
+    *channels = 1;
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
     }
-    return static_cast<uint32_t>(st.st_size - 44) & ~1u;
+    uint8_t h[44];
+    const bool ok = fread(h, 1, sizeof(h), f) == sizeof(h) && memcmp(h, "RIFF", 4) == 0;
+    fseek(f, 0, SEEK_END);
+    const long size = ftell(f);
+    fclose(f);
+    if (ok) {
+        const int ch = h[22] | (h[23] << 8);
+        const int r = h[24] | (h[25] << 8) | (h[26] << 16) | (h[27] << 24);
+        if ((ch == 1 || ch == 2) && r >= 8000 && r <= 48000) {
+            *channels = ch;
+            *rate = r;
+        }
+    }
+    if (size > 44) {
+        *bytes = static_cast<uint32_t>(size - 44) & ~static_cast<uint32_t>(*channels * 2 - 1);
+    }
+    return ok;
 }
 
 int64_t card_free()
@@ -191,19 +243,26 @@ int64_t card_free()
 void rec_task(void *)
 {
     int error = REC_OK;
+    /* the settings as they are now: a change applies to the next recording */
+    const int rate = pref_rate();
+    const int channels = pref_channels();
+    const int chunk = rate / CHUNKS_PER_SEC;
+    const size_t chunk_bytes = static_cast<size_t>(chunk) * channels * 2;
+    s_rec_byte_rate = static_cast<uint32_t>(rate) * channels * 2;
     esp_codec_dev_handle_t mic = bsp_audio_codec_microphone_init();
     esp_codec_dev_sample_info_t fs = {};
-    fs.sample_rate = RATE;
-    fs.channel = 1;
-    fs.bits_per_sample = 16;
+    fs.sample_rate = rate;
+    fs.channel = BSP_MIC_CHANNELS;          /* frames of BSP_MIC_FRAME_SLOTS int16: MIC1, MIC2 and the reference */
+    fs.bits_per_sample = BSP_MIC_BITS;
     const bool mic_open = mic && esp_codec_dev_open(mic, &fs) == ESP_CODEC_DEV_OK;
     auto *buf = static_cast<uint8_t *>(heap_caps_malloc(WRITE_SIZE, MALLOC_CAP_SPIRAM));
+    auto *frames = static_cast<int16_t *>(heap_caps_malloc(chunk * BSP_MIC_FRAME_SLOTS * sizeof(int16_t), MALLOC_CAP_SPIRAM));
     FILE *f = nullptr;
     if (!mic_open) {
         error = REC_ERR_MIC;
     } else {
-        esp_codec_dev_set_in_gain(mic, MIC_GAIN_DB);
-        f = buf ? fopen(s_rec_path, "wb") : nullptr;
+        esp_codec_dev_set_in_gain(mic, pref_gain());
+        f = buf && frames ? fopen(s_rec_path, "wb") : nullptr;
         if (!f) {
             error = REC_ERR_FILE;
         }
@@ -212,11 +271,11 @@ void rec_task(void *)
     uint32_t bytes = 0;
     size_t fill = 0;
     if (f) {
-        wav_header(header, 0);
+        wav_header(header, 0, rate, channels);
         if (fwrite(header, 1, sizeof(header), f) != sizeof(header)) {
             error = REC_ERR_WRITE;
         }
-        ESP_LOGI(TAG, "recording %s", s_rec_path);
+        ESP_LOGI(TAG, "recording %s: %d Hz, %s, %.0f dB", s_rec_path, rate, channels == 2 ? "stereo" : "mono", pref_gain());
     }
     if (error == REC_OK) {
         /* the LED blinks red while recording: seen from the home screen and with the screen off */
@@ -227,7 +286,7 @@ void rec_task(void *)
     int64_t free_left = card_free();
     while (error == REC_OK && !s_rec_stop) {
         /* the buffer is written once the next chunk would not fit; the header follows every few seconds */
-        if (WRITE_SIZE - fill < CHUNK_SAMPLES * 2) {
+        if (WRITE_SIZE - fill < chunk_bytes) {
             if (fwrite(buf, 1, fill, f) != fill) {
                 error = REC_ERR_WRITE;
                 break;
@@ -236,7 +295,7 @@ void rec_task(void *)
             fill = 0;
             if (pdTICKS_TO_MS(xTaskGetTickCount() - last_header) >= HEADER_EVERY_MS) {
                 last_header = xTaskGetTickCount();
-                wav_header(header, bytes);
+                wav_header(header, bytes, rate, channels);
                 fseek(f, 0, SEEK_SET);
                 fwrite(header, 1, sizeof(header), f);
                 fseek(f, 0, SEEK_END);
@@ -244,13 +303,27 @@ void rec_task(void *)
                 fsync(fileno(f));
             }
         }
-        if (esp_codec_dev_read(mic, buf + fill, CHUNK_SAMPLES * 2) != ESP_CODEC_DEV_OK) {
+        if (esp_codec_dev_read(mic, frames, chunk * BSP_MIC_FRAME_SLOTS * sizeof(int16_t)) != ESP_CODEC_DEV_OK) {
             error = REC_ERR_MIC;
             break;
         }
-        put_peak(reinterpret_cast<int16_t *>(buf + fill), CHUNK_SAMPLES);
-        fill += CHUNK_SAMPLES * 2;
-        bytes += CHUNK_SAMPLES * 2;
+        /* mono: the mean of the two microphones; stereo: MIC1 left, MIC2 right */
+        auto *out = reinterpret_cast<int16_t *>(buf + fill);
+        int peak = 0;
+        for (int i = 0; i < chunk; i++) {
+            const int16_t *fr = frames + i * BSP_MIC_FRAME_SLOTS;
+            const int m1 = fr[BSP_MIC_SLOT_MIC1], m2 = fr[BSP_MIC_SLOT_MIC2];
+            if (channels == 2) {
+                out[i * 2] = static_cast<int16_t>(m1);
+                out[i * 2 + 1] = static_cast<int16_t>(m2);
+            } else {
+                out[i] = static_cast<int16_t>((m1 + m2) / 2);
+            }
+            peak = std::max(peak, std::abs((m1 + m2) / 2));
+        }
+        put_level(peak);
+        fill += chunk_bytes;
+        bytes += chunk_bytes;
         s_rec_bytes = bytes;
         if (free_left >= 0 && free_left - static_cast<int64_t>(fill) < MIN_FREE) {
             error = REC_ERR_FULL;
@@ -261,11 +334,11 @@ void rec_task(void *)
         if (fill && fwrite(buf, 1, fill, f) != fill && error == REC_OK) {
             error = REC_ERR_WRITE;
         }
-        wav_header(header, bytes);
+        wav_header(header, bytes, rate, channels);
         fseek(f, 0, SEEK_SET);
         fwrite(header, 1, sizeof(header), f);
         fclose(f);
-        ESP_LOGI(TAG, "recorded %lu s, %s", static_cast<unsigned long>(bytes / BYTES_PER_SEC),
+        ESP_LOGI(TAG, "recorded %lu s, %s", static_cast<unsigned long>(bytes / s_rec_byte_rate),
                  error == REC_OK ? "ok" : "ended early");
     }
     phone_led_release(HOLD_NAME);
@@ -273,26 +346,30 @@ void rec_task(void *)
         esp_codec_dev_close(mic);
     }
     heap_caps_free(buf);
+    heap_caps_free(frames);
     s_rec_error = error;
     s_recording = false;
     vTaskDelete(nullptr);
 }
 
+/* Plays a recording at its own rate; a stereo one is mixed down for the speaker */
 void play_task(void *)
 {
+    const int rate = s_play_rate;
+    const int channels = s_play_ch;
+    const int chunk = rate / CHUNKS_PER_SEC;
     FILE *f = fopen(s_play_path, "rb");
     auto spk = f ? static_cast<esp_codec_dev_handle_t>(phone_audio_speaker_take_yielding([]() {
         s_play_stop = true;     /* music, the radio or a video takes the speaker */
     })) : nullptr;
     esp_codec_dev_sample_info_t fs = {};
-    fs.sample_rate = RATE;
+    fs.sample_rate = rate;
     fs.channel = 1;
     fs.bits_per_sample = 16;
     const bool open = spk && esp_codec_dev_open(spk, &fs) == ESP_CODEC_DEV_OK;
-    constexpr int N = CHUNK_SAMPLES;
-    int16_t pcm[N];
-    bool failed = !open;
-    if (open) {
+    auto *pcm = static_cast<int16_t *>(heap_caps_malloc(MAX_CHUNK * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    bool failed = !open || !pcm;
+    if (open && pcm) {
         esp_codec_dev_set_out_vol(spk, phone_audio_get_volume());
         fseek(f, 44, SEEK_SET);
         int volume = phone_audio_get_volume();
@@ -301,9 +378,14 @@ void play_task(void *)
                 vTaskDelay(pdMS_TO_TICKS(50));
                 continue;
             }
-            const size_t got = fread(pcm, 2, N, f);
+            const size_t got = fread(pcm, 2 * channels, chunk, f);
             if (got == 0) {
                 break;
+            }
+            if (channels == 2) {
+                for (size_t i = 0; i < got; i++) {
+                    pcm[i] = static_cast<int16_t>((pcm[i * 2] + pcm[i * 2 + 1]) / 2);
+                }
             }
             if (phone_audio_get_volume() != volume) {
                 volume = phone_audio_get_volume();
@@ -314,8 +396,10 @@ void play_task(void *)
                 failed = true;
                 break;
             }
-            s_play_pos = s_play_pos + got * 2;
+            s_play_pos = s_play_pos + got * 2 * channels;
         }
+    }
+    if (open) {
         esp_codec_dev_close(spk);
     }
     if (spk) {
@@ -324,6 +408,7 @@ void play_task(void *)
     if (f) {
         fclose(f);
     }
+    heap_caps_free(pcm);
     s_play_failed = failed;
     s_playing = false;
     vTaskDelete(nullptr);
@@ -413,6 +498,8 @@ void start_playing(int i)
     s_play_failed = false;
     s_play_pos = 0;
     s_play_total = s_entries[i].bytes;
+    s_play_rate = s_entries[i].rate;
+    s_play_ch = s_entries[i].channels;
     clear_peaks();
     s_playing = true;
     if (xTaskCreatePinnedToCore(play_task, "rec_play", 4096, nullptr, 5, nullptr, 1) != pdPASS) {
@@ -480,9 +567,16 @@ void update_row(int i)
     lv_obj_set_style_text_color(icon, lv_color_hex(active ? COLOR_PLAY : COLOR_SUB), 0);
     std::string text;
     if (active) {
-        text = mmss(s_play_pos / BYTES_PER_SEC) + " / " + mmss(e.bytes / BYTES_PER_SEC);
+        text = mmss(s_play_pos / e.byte_rate()) + " / " + mmss(e.bytes / e.byte_rate());
     } else {
-        text = mmss(e.bytes / BYTES_PER_SEC) + "  ·  " + size_text(e.bytes);
+        text = mmss(e.bytes / e.byte_rate()) + "  ·  " + size_text(e.bytes);
+        /* what differs from the default (16 kHz mono) */
+        if (e.channels == 2) {
+            text += "  ·  Stereo";
+        }
+        if (e.rate != 16000) {
+            text += "  ·  " + std::to_string(e.rate / 1000) + " kHz";
+        }
     }
     lv_label_set_text(s_subs[i], text.c_str());
 }
@@ -494,7 +588,9 @@ void show_list()
         while (dirent *de = readdir(d)) {
             const std::string name = de->d_name;
             if (name.size() > 4 && strcasecmp(name.c_str() + name.size() - 4, ".wav") == 0) {
-                s_entries.push_back({name, wav_bytes(path_of(name).c_str())});
+                Entry e = {name, 0, 16000, 1};
+                wav_info(path_of(name).c_str(), &e.bytes, &e.rate, &e.channels);
+                s_entries.push_back(e);
             }
         }
         closedir(d);
@@ -607,7 +703,7 @@ void show_idle_state()
         lv_label_set_text(s_state, T("Không có thẻ nhớ", "No memory card"));
         return;
     }
-    const int64_t secs = std::max<int64_t>(0, free_bytes - MIN_FREE) / BYTES_PER_SEC;
+    const int64_t secs = std::max<int64_t>(0, free_bytes - MIN_FREE) / (static_cast<int64_t>(pref_rate()) * pref_channels() * 2);
     char t[96];
     snprintf(t, sizeof(t), T("Ghi được khoảng %lld giờ", "About %lld hours of recording left"),
              static_cast<long long>(secs / 3600));
@@ -686,7 +782,7 @@ void on_timer(lv_timer_t *)
         lv_obj_invalidate(s_wave);
     }
     if (s_recording) {
-        lv_label_set_text(s_time, mmss(s_rec_bytes / BYTES_PER_SEC).c_str());
+        lv_label_set_text(s_time, mmss(s_rec_bytes / s_rec_byte_rate).c_str());
         s_was_recording = true;
     } else if (s_was_recording) {
         /* the recording just ended: the wave goes flat */
@@ -737,6 +833,146 @@ lv_obj_t *plain(lv_obj_t *parent)
     lv_obj_remove_style_all(o);
     lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
     return o;
+}
+
+/* ---------- settings sheet ---------- */
+
+struct Option {
+    const char *key;
+    int def;
+    const char *title_vi, *title_en;
+    const char *names[3];
+    int count;
+};
+
+const Option OPTIONS[] = {
+    {"rec_ch", 0, "Kênh", "Channels", {"Mono", "Stereo", nullptr}, 2},
+    {"rec_rate", 0, "Chất lượng", "Quality", {"16 kHz", "32 kHz", "48 kHz"}, 3},
+    {"rec_gain", 1, "Độ nhạy micro", "Microphone gain", {nullptr, nullptr, nullptr}, 3},
+};
+constexpr int OPTION_COUNT = sizeof(OPTIONS) / sizeof(OPTIONS[0]);
+
+lv_obj_t *s_sheet;
+lv_obj_t *s_opt_btns[OPTION_COUNT][3];
+
+const char *option_name(int o, int v)
+{
+    if (o == 2) {
+        static const char *const vi[] = {"Thấp", "Vừa", "Cao"};
+        static const char *const en[] = {"Low", "Medium", "High"};
+        return T(vi[v], en[v]);
+    }
+    return OPTIONS[o].names[v];
+}
+
+void show_options()
+{
+    for (int o = 0; o < OPTION_COUNT; o++) {
+        const int cur = phone_pref_get(OPTIONS[o].key, OPTIONS[o].def);
+        for (int v = 0; v < OPTIONS[o].count; v++) {
+            lv_obj_set_style_bg_color(s_opt_btns[o][v], lv_color_hex(v == cur ? 0x2F80ED : COLOR_ROW_ON), 0);
+        }
+    }
+}
+
+void on_option(lv_event_t *e)
+{
+    const int code = static_cast<int>(reinterpret_cast<intptr_t>(lv_event_get_user_data(e)));
+    const int o = code / 16, v = code % 16;
+    phone_pref_set(OPTIONS[o].key, v);
+    show_options();
+    if (!s_recording) {
+        show_idle_state();      /* the time left depends on the format */
+    }
+}
+
+void build_sheet(lv_obj_t *root)
+{
+    /* a shade over the app; a tap on it closes the sheet */
+    s_sheet = lv_obj_create(root);
+    lv_obj_remove_style_all(s_sheet);
+    lv_obj_add_flag(s_sheet, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_FLOATING | LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE));
+    lv_obj_set_size(s_sheet, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(s_sheet, LV_OPA_60, 0);
+    lv_obj_set_style_bg_color(s_sheet, lv_color_hex(0x000000), 0);
+    lv_obj_remove_flag(s_sheet, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_sheet, [](lv_event_t *e) {
+        if (lv_event_get_target_obj(e) == s_sheet) {
+            lv_obj_add_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+        }
+    }, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *card = lv_obj_create(s_sheet);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_size(card, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_align(card, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(COLOR_CARD), 0);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_pad_all(card, 18, 0);
+    lv_obj_set_style_pad_row(card, 12, 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_add_flag(card, LV_OBJ_FLAG_CLICKABLE);       /* a tap on the card does not close the sheet */
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(card);
+    lv_label_set_text(title, T("Cài đặt ghi âm", "Recording settings"));
+    lv_obj_set_style_text_font(title, phone_font_by_size(24), 0);
+
+    for (int o = 0; o < OPTION_COUNT; o++) {
+        lv_obj_t *cap = lv_label_create(card);
+        lv_label_set_text(cap, T(OPTIONS[o].title_vi, OPTIONS[o].title_en));
+        lv_obj_set_style_text_color(cap, lv_color_hex(COLOR_SUB), 0);
+        lv_obj_set_style_text_font(cap, phone_font_by_size(18), 0);
+        lv_obj_t *row = lv_obj_create(card);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, LV_PCT(100), 52);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_style_pad_column(row, 8, 0);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        for (int v = 0; v < OPTIONS[o].count; v++) {
+            lv_obj_t *b = lv_button_create(row);
+            lv_obj_remove_style_all(b);
+            lv_obj_set_height(b, LV_PCT(100));
+            lv_obj_set_flex_grow(b, 1);
+            lv_obj_set_style_radius(b, 12, 0);
+            lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
+            lv_obj_add_event_cb(b, on_option, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<intptr_t>(o * 16 + v)));
+            lv_obj_t *l = lv_label_create(b);
+            lv_label_set_text(l, option_name(o, v));
+            lv_obj_set_style_text_font(l, phone_font_by_size(18), 0);
+            lv_obj_center(l);
+            s_opt_btns[o][v] = b;
+        }
+    }
+    lv_obj_t *note = lv_label_create(card);
+    lv_label_set_text(note, T("Áp dụng từ lần ghi sau. Stereo: micro 1 bên trái, micro 2 bên phải.",
+                              "Applies to the next recording. Stereo: microphone 1 left, microphone 2 right."));
+    lv_obj_set_width(note, LV_PCT(100));
+    lv_label_set_long_mode(note, LV_LABEL_LONG_MODE_WRAP);
+    lv_obj_set_style_text_color(note, lv_color_hex(COLOR_SUB), 0);
+    lv_obj_set_style_text_font(note, phone_font_by_size(16), 0);
+    show_options();
+
+    /* the gear, top right of the app */
+    lv_obj_t *gear = lv_button_create(root);
+    lv_obj_remove_style_all(gear);
+    lv_obj_add_flag(gear, LV_OBJ_FLAG_FLOATING);
+    lv_obj_set_size(gear, 56, 56);
+    lv_obj_align(gear, LV_ALIGN_TOP_RIGHT, 0, -6);
+    lv_obj_set_style_radius(gear, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(gear, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(gear, lv_color_hex(COLOR_CARD), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(gear, [](lv_event_t *) {
+        show_options();
+        lv_obj_remove_flag(s_sheet, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_sheet);
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *gl = lv_label_create(gear);
+    lv_label_set_text(gl, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_color(gl, lv_color_hex(COLOR_SUB), 0);
+    lv_obj_set_style_text_font(gl, &lv_font_montserrat_24, 0);
+    lv_obj_center(gl);
 }
 
 void build_ui()
@@ -826,6 +1062,7 @@ void build_ui()
     lv_obj_add_flag(s_list, LV_OBJ_FLAG_SCROLLABLE);
     ESP_LOGI(TAG, "list height %d", list_h);
 
+    build_sheet(root);
     show_button();
     if (s_recording) {
         lv_label_set_text(s_state, T("Đang ghi...", "Recording..."));

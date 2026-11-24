@@ -370,43 +370,6 @@ void add_option(lv_obj_t *panel, const char *text, const char *key)
     lv_obj_add_event_cb(sw, on_option, LV_EVENT_VALUE_CHANGED, const_cast<char *>(key));
 }
 
-/* Echo delay: the panel closes so the result (a notice bubble) can be seen */
-void on_calibrate(lv_event_t *)
-{
-    lv_obj_add_flag(s_opts, LV_OBJ_FLAG_HIDDEN);
-    assistant_chat_calibrate();
-}
-
-void add_calibrate(lv_obj_t *panel)
-{
-    lv_obj_t *row = lv_obj_create(panel);
-    lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(row, 12, 0);
-    lv_obj_remove_flag(row, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE));
-    lv_obj_t *label = lv_label_create(row);
-    lv_label_set_text(label, T("Đo độ trễ tiếng vọng (cho ngắt lời)", "Measure the echo delay (for interrupting)"));
-    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_flex_grow(label, 1);
-    lv_obj_set_style_text_font(label, phone_font_by_size(18), 0);
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_t *btn = lv_button_create(row);
-    lv_obj_remove_style_all(btn);
-    lv_obj_set_size(btn, LV_SIZE_CONTENT, 40);
-    lv_obj_set_style_pad_hor(btn, 16, 0);
-    lv_obj_set_style_radius(btn, 20, 0);
-    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(COLOR_ACCENT), 0);
-    lv_obj_add_event_cb(btn, on_calibrate, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t *bl = lv_label_create(btn);
-    lv_label_set_text(bl, T("Đo", "Measure"));
-    lv_obj_set_style_text_font(bl, phone_font_by_size(18), 0);
-    lv_obj_set_style_text_color(bl, lv_color_white(), 0);
-    lv_obj_center(bl);
-}
-
 void on_mic(lv_event_t *)
 {
     assistant_chat_button();
@@ -701,7 +664,6 @@ void build_chat(lv_obj_t *root, int root_w, int root_h)
     lv_obj_add_flag(s_opts, LV_OBJ_FLAG_HIDDEN);
     add_option(s_opts, T("Gọi \"Hi ESP\" để bắt đầu", "Say \"Hi ESP\" to start"), "wake");
     add_option(s_opts, T("Nói \"Hi ESP\" để ngắt lời", "Say \"Hi ESP\" to interrupt"), "barge");
-    add_calibrate(s_opts);
 }
 
 void build_ui()
