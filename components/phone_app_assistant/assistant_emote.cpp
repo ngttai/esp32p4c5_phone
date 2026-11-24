@@ -60,6 +60,15 @@ const struct {
     {"surprised", PACK(surprised), 20}, {"shocked", PACK(shocked), 20}, {"sleepy", PACK(asleep), 5},
 };
 
+/* Faces of the app states that only a card brings (<name>.eaf); without it, the face of the emotion named second */
+const struct {
+    const char *name;
+    const char *emotion;
+} STATE_FACES[] = {
+    {"listening", "idle"},      // while listening
+    {"speaking", "neutral"},    // while answering, when the server sends no emotion or "neutral"
+};
+
 /* A card can bring its own faces: appdata/assistant/emote/<emotion>.eaf, else pack_<name>.eaf (a folder of the
  * Emote Pack copied as it is); any size up to MAX_SIDE. Bigger than SIZE: each frame is decoded aside and shrunk
  * into SIZE once (nearest pixel), so LVGL copies the image as it is; scaling it in LVGL is done in software on every
@@ -85,6 +94,7 @@ uint8_t *s_file;                // the animation read from the card (PSRAM), or 
 bool s_from_card;               // the animation playing comes from the card
 char s_emotion[32];
 int s_index, s_total;
+uint32_t s_loops;               // times the animation playing came back to its first frame
 
 uint16_t rgb565(uint32_t hex)
 {
@@ -100,6 +110,9 @@ void show_next()
     for (int tries = 0; tries < s_total; tries++) {
         const int index = s_index;
         s_index = (s_index + 1) % s_total;
+        if (s_index == 0) {
+            s_loops++;
+        }
         eaf_dec_header_t header;
         if (eaf_dec_get_frame_info(s_dec, index, &header) != EAF_DEC_TYPE_VALID) {
             continue;       /* the pack ends with a marker frame */
@@ -276,13 +289,17 @@ extern "C" lv_obj_t *assistant_emote_create(lv_obj_t *parent, uint32_t backgroun
 
 namespace {
 
-/* The card's animation of MAP[m]: <emotion>.eaf, else pack_<name>.eaf; false when neither is there or usable */
-bool open_card(int m)
+/* The card's animation of MAP[m]: <state>.eaf for a state face, else <emotion>.eaf, else pack_<name>.eaf; false
+ * when none is there or usable */
+bool open_card(int m, const char *state = nullptr)
 {
     char pack[40];
     snprintf(pack, sizeof(pack), "pack_%s", MAP[m].pack);
     size_t size = 0;
-    s_file = read_card(MAP[m].emotion, &size);
+    s_file = state ? read_card(state, &size) : nullptr;
+    if (!s_file) {
+        s_file = read_card(MAP[m].emotion, &size);
+    }
     if (!s_file) {
         s_file = read_card(pack, &size);
     }
@@ -304,6 +321,16 @@ extern "C" void assistant_emote_set(const char *emotion)
     if (!s_img) {
         return;
     }
+    /* a state face ("listening", "speaking"): its own file on the card, else the face of its emotion */
+    const char *state = nullptr;
+    for (const auto &f : STATE_FACES) {
+        if (emotion && strcmp(emotion, f.name) == 0) {
+            state = f.name;
+            emotion = f.emotion;
+            break;
+        }
+    }
+    const char *shown = state ? state : nullptr;
     int m = 0;      /* unknown names play "neutral", the first entry */
     for (int i = 0; i < static_cast<int>(sizeof(MAP) / sizeof(MAP[0])); i++) {
         if (emotion && strcmp(emotion, MAP[i].emotion) == 0) {
@@ -314,17 +341,20 @@ extern "C" void assistant_emote_set(const char *emotion)
     const bool card = card_mounted();
     /* the same face again: kept, unless it is the built-in one and the card is there now (the app was opened
      * while the card was not ready, or lent to a PC) */
-    if (strcmp(s_emotion, MAP[m].emotion) == 0 && s_dec && (s_from_card || !card)) {
+    if (!shown) {
+        shown = MAP[m].emotion;
+    }
+    if (strcmp(s_emotion, shown) == 0 && s_dec && (s_from_card || !card)) {
         return;
     }
-    strlcpy(s_emotion, MAP[m].emotion, sizeof(s_emotion));
+    strlcpy(s_emotion, shown, sizeof(s_emotion));
     close_animation();
     s_index = 0;
 
     /* A card that brings faces but not this one plays its own neutral: the built-in set is another character,
      * mixing the two looks broken (a set made for the 21 emotions of the protocol has no "idle") */
     int fps = MAP[m].fps;
-    s_from_card = card && open_card(m);
+    s_from_card = card && open_card(m, state);
     if (card && !s_from_card && m != 0 && open_card(0)) {
         ESP_LOGI(TAG, "\"%s\" is not on the card: its \"neutral\" plays", MAP[m].emotion);
         s_from_card = true;
@@ -349,4 +379,9 @@ extern "C" void assistant_emote_destroy(void)
     s_frame = nullptr;
     s_frame_px = 0;
     s_w = s_h = s_ow = s_oh = 0;
+}
+
+extern "C" uint32_t assistant_emote_loops(void)
+{
+    return s_loops;
 }

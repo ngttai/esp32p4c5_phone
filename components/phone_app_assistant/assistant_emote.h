@@ -20,6 +20,8 @@ lv_obj_t *assistant_emote_create(lv_obj_t *parent, uint32_t background);
 void assistant_emote_set(const char *emotion);
 /** Free the frame buffer and the decoder; the LVGL object and the timer are deleted with the app. */
 void assistant_emote_destroy(void);
+/** Times the animation shown came back to its first frame (counts on across faces) */
+uint32_t assistant_emote_loops(void);
 
 #ifdef __cplusplus
 }

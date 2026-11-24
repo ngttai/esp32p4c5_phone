@@ -248,6 +248,25 @@ void add_bubble(const char *text, bool user, bool notice)
     lv_obj_scroll_to_y(s_bubbles, LV_COORD_MAX, LV_ANIM_ON);
 }
 
+/* Emotion the server sent with the answer being played ("" before it sends one) */
+char s_answer_emotion[32];
+
+constexpr uint32_t EMOTION_MIN_MS = 2500;  // an emotion shown while answering plays whole rounds for at least this
+bool s_emotion_once;            // an emotion plays while answering: back to "speaking" after it
+uint32_t s_emotion_loops;       // assistant_emote_loops() at the last check
+uint32_t s_emotion_since;       // lv_tick_get() when it started
+
+/* While answering: the server's emotion played once, else the card's "speaking" face (also when the server sends
+ * none or "neutral") */
+void show_answer_face()
+{
+    const bool plain = !s_answer_emotion[0] || strcmp(s_answer_emotion, "neutral") == 0;
+    s_emotion_once = !plain;
+    s_emotion_loops = assistant_emote_loops();
+    s_emotion_since = lv_tick_get();
+    assistant_emote_set(plain ? "speaking" : s_answer_emotion);
+}
+
 void show_chat_state(int chat)
 {
     const char *text = "";
@@ -262,6 +281,7 @@ void show_chat_state(int chat)
         break;
     case ASSISTANT_CHAT_IDLE:
         text = T("Chạm micro để nói", "Tap the microphone to talk");
+        s_answer_emotion[0] = '\0';
         assistant_emote_set("neutral");
         break;
     case ASSISTANT_CHAT_OPENING:
@@ -273,7 +293,8 @@ void show_chat_state(int chat)
         text = T("Đang nghe...", "Listening...");
         symbol = LV_SYMBOL_STOP;
         color = COLOR_LISTEN;
-        assistant_emote_set("idle");
+        s_answer_emotion[0] = '\0';
+        assistant_emote_set("listening");
         break;
     case ASSISTANT_CHAT_THINKING:
         text = T("Đang nghĩ...", "Thinking...");
@@ -285,6 +306,7 @@ void show_chat_state(int chat)
         text = T("Đang trả lời. Chạm để ngắt lời.", "Answering. Tap to interrupt.");
         symbol = LV_SYMBOL_VOLUME_MAX;
         color = COLOR_OK;
+        show_answer_face();
         break;
     case ASSISTANT_CHAT_ERROR:
         text = T("Không kết nối được máy chủ", "Could not reach the server");
@@ -452,7 +474,12 @@ void on_timer(lv_timer_t *)
             add_bubble(msg.text, false, false);
             break;
         case ASSISTANT_CHAT_MSG_EMOTION:
-            assistant_emote_set(msg.text);
+            strlcpy(s_answer_emotion, msg.text, sizeof(s_answer_emotion));
+            if (s_shown_chat == ASSISTANT_CHAT_SPEAKING) {
+                show_answer_face();
+            } else {
+                assistant_emote_set(msg.text);
+            }
             break;
         case ASSISTANT_CHAT_MSG_NOTICE:
             add_bubble(msg.text, false, true);
@@ -461,8 +488,17 @@ void on_timer(lv_timer_t *)
     }
     const int chat = assistant_chat_state();
     if (chat != s_shown_chat) {
+        s_emotion_once = false;
         s_shown_chat = chat;
         show_chat_state(chat);
+    }
+    /* at the end of a round, once it has played EMOTION_MIN_MS */
+    if (s_emotion_once && chat == ASSISTANT_CHAT_SPEAKING && assistant_emote_loops() != s_emotion_loops) {
+        s_emotion_loops = assistant_emote_loops();
+        if (lv_tick_elaps(s_emotion_since) >= EMOTION_MIN_MS) {
+            s_emotion_once = false;
+            assistant_emote_set("speaking");
+        }
     }
     /* the ring around the button follows the voice */
     const int level = chat == ASSISTANT_CHAT_LISTENING ? assistant_chat_mic_level() : 0;

@@ -9,6 +9,9 @@ music, mute, ...) are not used. Espressif publishes the pack as open source samp
 
 A memory card can replace any of them: `/sdcard/appdata/assistant/emote/<emotion>.eaf` (for example `happy.eaf`), or
 `pack_<name>.eaf` as named in the pack, so a folder of the pack (`eaf_466x466`, ...) can be copied as it is.
+Two faces only a card brings: `listening.eaf`, shown while listening (else `idle`), and `speaking.eaf`, shown while
+the answer plays when the server sends no emotion or `neutral` (else `neutral`); an answer with a clear emotion
+(happy, sad, ...) plays it in whole rounds for at least 2.5 s, then `speaking` again.
 A card set that lacks a name (a set made for the 21 emotions of the protocol has no `idle`, shown while listening)
 plays the card's `neutral` instead, never a built-in face mixed into another character; the built-in set plays only
 when the card has no `neutral` either.
