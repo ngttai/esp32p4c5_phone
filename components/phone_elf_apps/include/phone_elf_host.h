@@ -29,6 +29,15 @@ void phone_elf_host_close(phone_elf_inst_t *inst);
 /** Number of apps loaded now. */
 int phone_elf_host_count(void);
 
+/* what phone_elf_symbols.c needs to know: the app whose code is running now (NULL / "" / 0 when none) */
+const char *phone_elf_host_current_data_dir(void);
+const char *phone_elf_host_current_pkg_dir(void);
+unsigned phone_elf_host_current_perms(void);
+const char *phone_elf_host_current_id(void);
+
+/** Register the chosen libc / system symbols with the loader (once). */
+void phone_elf_symbols_register(void);
+
 /** "led,audio,imu" -> bit mask; unknown names are ignored (and counted in *unknown when it is not NULL). */
 unsigned phone_elf_host_parse_permission(const char *name);
 

@@ -153,3 +153,7 @@ CONFIG_XIAOZHI_AUDIO_TASK_ALLOC_DYNAMIC=y
 
 # PNG icons inside app packages (.bpk)
 CONFIG_LV_USE_LODEPNG=y
+
+# ELF apps: the loader exports no libc / ESP-IDF symbols of its own; phone_elf_symbols.c registers a chosen list
+# CONFIG_ELF_LOADER_LIBC_SYMBOLS is not set
+# CONFIG_ELF_LOADER_ESPIDF_SYMBOLS is not set

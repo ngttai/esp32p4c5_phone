@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "phone_elf_api.h"
 
 static const phone_elf_api_t *A;
@@ -76,6 +77,33 @@ static void run_tests(void)
     } else {
         check("files denied", mk == PHONE_ELF_E_PERM, "make_dirs refused");
     }
+
+    /* the sandbox: the package folder is read only, everything outside the folders of the app is refused */
+    char pk[160];
+    snprintf(pk, sizeof(pk), "%s/manifest.json", A->pkg_dir(C));
+    FILE *rf = fopen(pk, "rb");
+    check("package file readable", rf != NULL, "pkg_dir()/manifest.json");
+    if (rf) fclose(rf);
+    snprintf(pk, sizeof(pk), "%s/sandbox.tmp", A->pkg_dir(C));
+    FILE *wf = fopen(pk, "wb");
+    check("package folder read only", wf == NULL, "fopen(wb) refused");
+    if (wf) { fclose(wf); remove(pk); }
+    FILE *of = fopen("/sdcard/packages/app_test.bpk", "rb");
+    check("outside files refused", of == NULL, "fopen of another folder refused");
+    if (of) fclose(of);
+    snprintf(pk, sizeof(pk), "%s/manifest.json", A->pkg_dir(C));
+    int rm = remove(pk);
+    FILE *again = fopen(pk, "rb");
+    check("remove refused", rm != 0 && again != NULL, "the manifest is still there");
+    if (again) fclose(again);
+
+    /* libm, 64-bit integers and doubles come from the chosen symbol list */
+    volatile double d = 2.0;
+    volatile long long big = 1000000000000LL;
+    double q = sqrt(d) * sqrt(d);
+    long long div = big / 7;
+    snprintf(info, sizeof(info), "q=%d.%03d div=%d", (int)q, (int)((q - (int)q) * 1000), (int)(div / 1000000));
+    check("math, 64-bit", fabs(q - 2.0) < 0.001 && div == 142857142857LL && fabsf(sinf(1.5707963f) - 1.0f) < 0.001f, info);
 
     /* settings: a 32-bit value, kept per app */
     ok = A->pref_set(C, "t1", 123456789) == 0 && A->pref_get(C, "t1", -1) == 123456789 && A->pref_get(C, "nokey", 77) == 77;

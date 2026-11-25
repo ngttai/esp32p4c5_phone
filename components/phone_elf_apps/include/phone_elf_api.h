@@ -10,6 +10,10 @@
  *  - UI calls and the callbacks (events, timers) run on the LVGL task with the LVGL lock held: keep them short,
  *    do not block (delay_ms in a callback freezes the screen).
  *  - Return values: 0 or a positive value on success, a negative errno on failure (PHONE_ELF_E_*).
+ *  - The only libc and system functions an app can link against are the ones in phone_elf_symbols.c (a chosen list: strings, memory,
+ *    math, printf, sandboxed files). An ELF that needs another symbol is refused when it loads.
+ *  - Files: fopen / remove / rename (libc names, sandboxed by the host) reach app_dir() with PERM_FILES, and pkg_dir() read only.
+ *    Every other path is refused (NULL / error).
  *  - Calls of a group the manifest did not ask for (`"permissions"`) fail with PHONE_ELF_E_PERM and do nothing.
  *    Permissions are a declaration checked by the host, not a sandbox: an ELF can still call any libc or IDF
  *    function the loader exports. Install packages you trust.
@@ -120,6 +124,9 @@ typedef struct {
     int (*net_online)(phone_elf_ctx_t *ctx);                                /* PERM_NET: 1 online, 0 offline, or a negative error */
     uint32_t (*free_psram)(phone_elf_ctx_t *ctx);
     uint32_t (*free_sram)(phone_elf_ctx_t *ctx);
+
+    /* files: the folder of the installed package (/sdcard/userapps/<id>), read only: its res/, icon, data files */
+    const char *(*pkg_dir)(phone_elf_ctx_t *ctx);
 } phone_elf_api_t;
 
 /* in the app: is a member there in the firmware that runs it? */

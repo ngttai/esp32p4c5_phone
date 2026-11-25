@@ -22,14 +22,24 @@
 
 #define MAGIC       0x454C4658u
 #define MAX_TIMERS  8
+#define MAX_EVENTS  64
 
 static const char *TAG = "ELFHOST";
+
+struct phone_elf_inst;
 
 typedef struct {
     lv_timer_t *timer;
     phone_elf_timer_cb_t cb;
     void *user;
+    struct phone_elf_inst *inst;
 } elf_timer_t;
+
+typedef struct {
+    phone_elf_event_cb_t cb;
+    void *user;
+    struct phone_elf_inst *inst;
+} elf_event_t;
 
 struct phone_elf_inst {
     uint32_t magic;
@@ -39,13 +49,17 @@ struct phone_elf_inst {
     unsigned perms;
     char id[40];
     char data_dir[96];
+    char pkg_dir[128];                      /* where the ELF was read from */
     char pref_prefix[8];                    /* "e" + 3 hex digits of the app id + "_" */
     phone_elf_host_close_cb_t close_cb;
     void *close_user;
     elf_timer_t timers[MAX_TIMERS];
+    elf_event_t events[MAX_EVENTS];
+    int n_events;
 };
 
 static phone_elf_inst_t *s_insts[PHONE_ELF_HOST_MAX_APPS];
+static phone_elf_inst_t *s_current;     /* the app whose code runs now: set around the entry and every callback */
 static bool s_registered;
 
 /* ---- the context of a call ---- */
@@ -132,14 +146,32 @@ static void api_obj_set_flex_row(phone_elf_ctx_t *ctx, void *o)
     lv_obj_set_flex_flow(o, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(o, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 }
+static void ev_adapter(lv_event_t *e)
+{
+    elf_event_t *w = lv_event_get_user_data(e);
+    if (!w || !w->inst || w->inst->closing) return;
+    phone_elf_inst_t *prev = s_current;
+    s_current = w->inst;
+    w->cb(e);
+    s_current = prev;
+}
 static void api_obj_add_event_cb(phone_elf_ctx_t *ctx, void *o, phone_elf_event_cb_t cb, int ev, void *ud)
 {
-    if (!G(0) || !o || !cb) return;
+    phone_elf_inst_t *in = G(0);
+    if (!in || !o || !cb) return;
+    if (in->n_events >= MAX_EVENTS) {
+        ESP_LOGW(TAG, "[%s] too many event handlers", in->id);
+        return;
+    }
+    elf_event_t *w = &in->events[in->n_events++];
+    w->cb = cb;
+    w->user = ud;
+    w->inst = in;
     lv_event_code_t code = ev == PHONE_ELF_EV_VALUE_CHANGED ? LV_EVENT_VALUE_CHANGED : ev == PHONE_ELF_EV_LONG_PRESSED ? LV_EVENT_LONG_PRESSED : LV_EVENT_CLICKED;
-    lv_obj_add_event_cb(o, (lv_event_cb_t)cb, code, ud);
+    lv_obj_add_event_cb(o, ev_adapter, code, w);
 }
 static void *api_event_target(void *e) { return lv_event_get_target(e); }
-static void *api_event_user_data(void *e) { return lv_event_get_user_data(e); }
+static void *api_event_user_data(void *e) { elf_event_t *w = lv_event_get_user_data(e); return w ? w->user : NULL; }
 static void api_slider_set_range(phone_elf_ctx_t *ctx, void *s, int a, int b) { if (G(0) && s) lv_slider_set_range(s, a, b); }
 static void api_slider_set_value(phone_elf_ctx_t *ctx, void *s, int v) { if (G(0) && s) lv_slider_set_value(s, v, LV_ANIM_OFF); }
 static int api_slider_get_value(phone_elf_ctx_t *ctx, void *s) { return (G(0) && s) ? lv_slider_get_value(s) : 0; }
@@ -153,7 +185,11 @@ static bool api_switch_get_state(phone_elf_ctx_t *ctx, void *sw) { return G(0) &
 static void timer_adapter(lv_timer_t *t)
 {
     elf_timer_t *m = lv_timer_get_user_data(t);
-    if (m && m->cb) m->cb(m->user);
+    if (!m || !m->cb || !m->inst || m->inst->closing) return;
+    phone_elf_inst_t *prev = s_current;
+    s_current = m->inst;
+    m->cb(m->user);
+    s_current = prev;
 }
 static void *api_timer_create(phone_elf_ctx_t *ctx, uint32_t period_ms, phone_elf_timer_cb_t cb, void *user)
 {
@@ -163,6 +199,7 @@ static void *api_timer_create(phone_elf_ctx_t *ctx, uint32_t period_ms, phone_el
         if (!in->timers[i].timer) {
             in->timers[i].cb = cb;
             in->timers[i].user = user;
+            in->timers[i].inst = in;
             in->timers[i].timer = lv_timer_create(timer_adapter, period_ms, &in->timers[i]);
             return in->timers[i].timer ? &in->timers[i] : NULL;
         }
@@ -277,6 +314,7 @@ static int api_battery_read(phone_elf_ctx_t *ctx, phone_elf_battery_t *out)
 static int api_net_online(phone_elf_ctx_t *ctx) { return G(PHONE_ELF_PERM_NET) ? (phone_net_online() ? 1 : 0) : PHONE_ELF_E_PERM; }
 static uint32_t api_free_psram(phone_elf_ctx_t *ctx) { (void)ctx; return heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
 static uint32_t api_free_sram(phone_elf_ctx_t *ctx) { (void)ctx; return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
+static const char *api_pkg_dir(phone_elf_ctx_t *ctx) { phone_elf_inst_t *in = G(0); return in ? in->pkg_dir : ""; }
 
 static const phone_elf_api_t s_api = {
     .size = sizeof(phone_elf_api_t), .version = PHONE_ELF_API_VERSION,
@@ -296,15 +334,7 @@ static const phone_elf_api_t s_api = {
     .beep = api_beep, .volume_get = api_volume_get, .led_set = api_led_set, .led_off = api_led_off,
     .imu_read = api_imu_read, .battery_read = api_battery_read, .net_online = api_net_online,
     .free_psram = api_free_psram, .free_sram = api_free_sram,
-};
-
-/* libc calls the loader's own table does not export (the apps use them) */
-static const struct esp_elfsym s_extra_syms[] = {
-    ESP_ELFSYM_EXPORT(snprintf), ESP_ELFSYM_EXPORT(fopen), ESP_ELFSYM_EXPORT(fclose), ESP_ELFSYM_EXPORT(fread),
-    ESP_ELFSYM_EXPORT(fseek), ESP_ELFSYM_EXPORT(ftell), ESP_ELFSYM_EXPORT(remove), ESP_ELFSYM_EXPORT(memcmp),
-    ESP_ELFSYM_EXPORT(strcmp), ESP_ELFSYM_EXPORT(strstr), ESP_ELFSYM_EXPORT(atoi), ESP_ELFSYM_EXPORT(strcpy),
-    ESP_ELFSYM_EXPORT(strncpy), ESP_ELFSYM_EXPORT(strcat),
-    ESP_ELFSYM_END,
+    .pkg_dir = api_pkg_dir,
 };
 
 unsigned phone_elf_host_parse_permission(const char *name)
@@ -358,7 +388,7 @@ phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, 
         return NULL;
     }
     if (!s_registered) {
-        ESP_LOGI(TAG, "register extra symbols: %d", esp_elf_register_symbol(s_extra_syms));
+        phone_elf_symbols_register();
         s_registered = true;
     }
     size_t n = 0;
@@ -377,6 +407,9 @@ phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, 
     in->perms = perms;
     snprintf(in->id, sizeof(in->id), "%s", app_id);
     snprintf(in->data_dir, sizeof(in->data_dir), "%s/%s", PHONE_SD_APPDATA, app_id);
+    snprintf(in->pkg_dir, sizeof(in->pkg_dir), "%s", elf_path);
+    char *slash = strrchr(in->pkg_dir, '/');
+    if (slash) *slash = 0;
     uint32_t h = 2166136261u;
     for (const char *c = app_id; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
     snprintf(in->pref_prefix, sizeof(in->pref_prefix), "e%03x_", (unsigned)(h & 0xFFF));
@@ -409,7 +442,10 @@ phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, 
 
     char *argv[] = {(char *)&s_api, (char *)in};
     t0 = esp_timer_get_time();
+    phone_elf_inst_t *prev = s_current;
+    s_current = in;
     r = esp_elf_request(&in->elf, 0, 2, argv);
+    s_current = prev;
     ESP_LOGI(TAG, "[%s] entry returned %d, %lld us", in->id, r, (long long)(esp_timer_get_time() - t0));
     return in;
 }
@@ -447,3 +483,9 @@ int phone_elf_host_count(void)
     }
     return n;
 }
+
+/* ---- what the symbols file asks about the running app ---- */
+const char *phone_elf_host_current_data_dir(void) { return s_current ? s_current->data_dir : ""; }
+const char *phone_elf_host_current_pkg_dir(void) { return s_current ? s_current->pkg_dir : ""; }
+unsigned phone_elf_host_current_perms(void) { return s_current ? s_current->perms : 0; }
+const char *phone_elf_host_current_id(void) { return s_current ? s_current->id : ""; }
