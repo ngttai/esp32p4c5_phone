@@ -27,9 +27,12 @@
 #define ESP_UTILS_LOG_TAG "Main"
 #include "esp_lib_utils.h"
 
+extern "C" const lv_image_dsc_t phone_icon_no_battery;
+
 using namespace esp_brookesia;
 
 constexpr int WIFI_ICON_SEARCHING = 4;  // added to the stock Wi-Fi icon: off 0, levels 1..3, searching 4
+constexpr int BATTERY_ICON_ABSENT = 5;  // added to the stock battery icon: levels 0..3, charging 4, no battery 5
 constexpr int CELL_ICON_ID = 1000;      // 4G signal on the status bar
 constexpr int CELL_DATA_ICON_ID = 1001; // "4G" left of it while mobile data carries the traffic
 extern "C" const lv_image_dsc_t phone_cell_nosim, phone_cell_bars0, phone_cell_bars1, phone_cell_bars2,
@@ -108,6 +111,13 @@ extern "C" void app_main(void)
         if (wifi_icon.image_num == 4) {
             wifi_icon.images[WIFI_ICON_SEARCHING] = gui::StyleImage::IMAGE_RECOLOR(wifi_icon.images[3].resource, 0x767778);
             wifi_icon.image_num = 5;
+        }
+        /* Battery icon: a 6th image, the empty battery slashed, grey like the searching Wi-Fi, when the board runs
+         * without a battery (from USB) */
+        auto &bat_icon = stylesheet->display.status_bar.data.battery.icon_data.icon;
+        if (bat_icon.image_num == 5) {
+            bat_icon.images[BATTERY_ICON_ABSENT] = gui::StyleImage::IMAGE_RECOLOR(&phone_icon_no_battery, 0x767778);
+            bat_icon.image_num = 6;
         }
         /* Navigation (Settings > System): the three-key bar shown by a swipe up, without the bottom hint bar; or
          * gestures: back from the left / right edge, home and recents from the bottom edge, with their hint bars */
@@ -256,8 +266,10 @@ extern "C" void app_main(void)
                 bool chg = b.state == BSP_BATTERY_CHARGING;
                 if (pct != s_bat || chg != s_chg) {
                     if (pct < 0) {
-                        bar->hideBatteryIcon();
+                        /* no battery: the slashed icon, no percent */
+                        bar->showBatteryIcon();
                         bar->hideBatteryPercent();
+                        bar->setBatteryIconState(BATTERY_ICON_ABSENT);
                     } else {
                         if (s_bat < 0) {
                             bar->showBatteryIcon();

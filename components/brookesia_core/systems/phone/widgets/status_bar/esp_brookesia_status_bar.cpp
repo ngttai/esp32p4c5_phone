@@ -482,6 +482,13 @@ bool StatusBar::setBatteryPercent(bool charge_flag, int percent) const
     return true;
 }
 
+bool StatusBar::setBatteryIconState(int state) const
+{
+    _battery_state = state;
+    ESP_UTILS_CHECK_FALSE_RETURN(setIconState(_battery_id, _battery_state), false, "Set battery icon state failed");
+    return true;
+}
+
 bool StatusBar::showBatteryPercent(void) const
 {
     ESP_UTILS_LOGD("Show battery percent(0x%p)", this);

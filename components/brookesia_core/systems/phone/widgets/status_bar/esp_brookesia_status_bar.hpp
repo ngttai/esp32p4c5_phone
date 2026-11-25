@@ -103,6 +103,8 @@ public:
 
     // Battery
     bool setBatteryPercent(bool charge_flag, int percent) const;
+    /* Show one image of the battery icon by its index (an image added to the stylesheet, "no battery") */
+    bool setBatteryIconState(int state) const;
     bool showBatteryPercent(void) const;
     bool hideBatteryPercent(void) const;
     bool showBatteryIcon(void) const;

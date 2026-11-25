@@ -155,7 +155,8 @@ void refresh(lv_timer_t *)
     if (cell && ci.state == PHONE_CELL_REGISTERED && ci.oper[0]) {
         lv_label_set_text_fmt(s_cell_sub, "%s%s", ci.oper, ci.roaming ? T(" · chuyển vùng", " · roaming") : "");
     } else {
-        lv_label_set_text(s_cell_sub, phone_cell_state_text(cell ? ci.state : PHONE_CELL_OFF));
+        lv_label_set_text(s_cell_sub, cell && ci.state == PHONE_CELL_NO_ANSWER ? T("Cần pin", "Needs the battery")
+                          : phone_cell_state_text(cell ? ci.state : PHONE_CELL_OFF));
     }
 
     /* Mobile data: dim until 4G is ready (registered) */
@@ -163,7 +164,7 @@ void refresh(lv_timer_t *)
     const bool cdata = usable && phone_cell_data_enabled();
     lv_obj_set_style_bg_color(s_cdata_tile, lv_color_hex(cdata ? COLOR_TILE_ON : COLOR_TILE), 0);
     lv_obj_set_style_opa(s_cdata_tile, usable ? LV_OPA_COVER : LV_OPA_50, 0);
-    lv_label_set_text(s_cdata_sub, !cell ? T("Cần bật 4G", "Turn 4G on") : !usable ? phone_cell_state_text(ci.state)
+    lv_label_set_text(s_cdata_sub, !cell ? T("Cần bật 4G", "Turn 4G on") : !usable ? (ci.state == PHONE_CELL_NO_ANSWER ? T("Cần pin", "Needs the battery") : phone_cell_state_text(ci.state))
                       : !cdata ? T("Tắt", "Off") : phone_cell_data_text(ci.data));
 
     /* Mute and the sliders follow the volume keys and Settings */
@@ -367,6 +368,8 @@ lv_obj_t *make_tile(lv_obj_t *parent, int x, const char *icon, const char *title
     lv_obj_set_width(sub, 182);
     lv_label_set_long_mode(sub, LV_LABEL_LONG_MODE_DOTS);
     lv_obj_set_style_text_font(sub, phone_font_by_size(16), 0);
+    /* one line: without a height the label wraps upward over the title instead of ending in dots */
+    lv_obj_set_height(sub, lv_font_get_line_height(phone_font_by_size(16)));
     lv_obj_set_style_text_color(sub, lv_color_hex(0xDDE3E9), 0);
     lv_obj_align(sub, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     if (icon_out) {

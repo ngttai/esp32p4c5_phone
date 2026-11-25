@@ -33,6 +33,7 @@ LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_wifi_close_24_24);
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_wifi_level1_24_24);
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_wifi_level2_24_24);
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_wifi_level3_24_24);
+extern "C" const lv_image_dsc_t phone_icon_no_battery;
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_battery_level1_24_24);
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_battery_level2_24_24);
 LV_IMAGE_DECLARE(esp_brookesia_image_middle_status_bar_battery_level3_24_24);
@@ -622,11 +623,15 @@ void update_status()
         const int pct = LV_CLAMP(1, b.percent, 100);
         lv_label_set_text_fmt(s_ui.bat_label, "%d%%", pct);
         lv_image_set_src(s_ui.bat_icon, b.state == BSP_BATTERY_CHARGING ? bat[4] : bat[(pct - 1) / 25]);
+        lv_obj_set_style_image_recolor(s_ui.bat_icon, lv_color_white(), 0);
         lv_obj_remove_flag(s_ui.bat_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(s_ui.bat_icon, LV_OBJ_FLAG_HIDDEN);
     } else {
+        /* no battery (or no answer from the gauge): the slashed icon in grey, as on the status bar */
+        lv_image_set_src(s_ui.bat_icon, &phone_icon_no_battery);
+        lv_obj_set_style_image_recolor(s_ui.bat_icon, lv_color_hex(0x767778), 0);
         lv_obj_add_flag(s_ui.bat_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_ui.bat_icon, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(s_ui.bat_icon, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
