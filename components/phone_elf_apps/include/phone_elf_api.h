@@ -60,10 +60,10 @@ typedef struct {
     void (*delay_ms)(uint32_t ms);
 
     /* files: only under the folder of the app */
-    const char *(*app_dir)(void);                           /* "/sdcard/appdata/<app>" */
+    const char *(*app_dir)(void);                           /* "/sdcard/appdata/<app id>" */
     int (*make_dirs)(const char *file_path);                /* create the folders above a file; 0 when they exist */
 
-    /* settings of the app (NVS, key up to 10 characters, kept apart from the system settings; a value is 0..255, the system stores one byte) */
+    /* settings of the app (NVS, key up to 9 characters, kept apart from the system settings and from other apps; a value is 0..255, the system stores one byte) */
     int (*pref_get)(const char *key, int def);
     void (*pref_set)(const char *key, int value);
 

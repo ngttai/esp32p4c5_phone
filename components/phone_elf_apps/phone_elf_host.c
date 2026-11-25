@@ -1,12 +1,7 @@
-/*
- * ELF loader experiment: runs app_test.elf (from /sdcard/appdata/app_test/app_test.elf, else the copy embedded in the firmware)
- * 25 s after the start. The app gets a full-screen container and the phone_elf_api_t table.
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <sys/stat.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -16,31 +11,30 @@
 #include "bsp/esp-bsp.h"
 #include "lvgl.h"
 #include "phone_elf_api.h"
-#include "phone_storage.h"
+#include "phone_elf_host.h"
 #include "phone_paths.h"
 #include "phone_locale.h"
 #include "phone_audio.h"
 #include "phone_led.h"
 #include "phone_power.h"
 #include "phone_net.h"
-#include "phone_elf_test.h"
 
-#define APP_NAME    "app_test"
-#define APP_DIR     PHONE_SD_APPDATA "/" APP_NAME
-#define SD_PATH     APP_DIR "/app_test.elf"
-#define RUN_MAX_MS  (10 * 60 * 1000)
+static const char *TAG = "ELFHOST";
 
-static const char *TAG = "ELFTEST";
-
-extern const uint8_t app_test_elf_start[] asm("_binary_app_test_elf_start");
-extern const uint8_t app_test_elf_end[] asm("_binary_app_test_elf_end");
-
+static bool s_active;
+static esp_elf_t s_elf;
 static lv_obj_t *s_root;
-static volatile bool s_close;
+static char s_id[40];
+static char s_data_dir[96];
+static char s_pref_prefix[8];       /* "e" + 3 hex digits of the app id + "_" */
+static phone_elf_host_close_cb_t s_close_cb;
+static void *s_close_user;
+static bool s_registered;
 
 /* ---- API implementation ---- */
-static void api_log(const char *text) { ESP_LOGI(TAG, "from ELF: %s", text); }
-static void api_close(void) { s_close = true; }
+static void api_log(const char *text) { ESP_LOGI(TAG, "[%s] %s", s_id, text); }
+static void close_async(void *arg) { (void)arg; if (s_active && s_close_cb) s_close_cb(s_close_user); }
+static void api_close(void) { lv_async_call(close_async, NULL); }   /* after the callback of the app has returned */
 static const char *api_tr(const char *vi, const char *en) { return phone_tr(vi, en); }
 
 static void *api_root(void) { return s_root; }
@@ -74,11 +68,12 @@ static uint32_t api_millis(void) { return (uint32_t)(esp_timer_get_time() / 1000
 static int64_t api_epoch(void) { time_t t = time(NULL); return t > 1700000000 ? (int64_t)t : 0; }
 static void api_delay_ms(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
-static const char *api_app_dir(void) { return APP_DIR; }
+static const char *api_app_dir(void) { return s_data_dir; }
 static int api_make_dirs(const char *path)
 {
-    /* only below the folder of the app */
-    if (strncmp(path, APP_DIR "/", strlen(APP_DIR) + 1) != 0 || strstr(path, "..")) {
+    /* only below the data folder of the app */
+    size_t n = strlen(s_data_dir);
+    if (strncmp(path, s_data_dir, n) != 0 || path[n] != '/' || strstr(path, "..")) {
         return -1;
     }
     return phone_sd_make_dirs(path);
@@ -86,14 +81,14 @@ static int api_make_dirs(const char *path)
 
 static int api_pref_get(const char *key, int def)
 {
-    char k[16];
-    snprintf(k, sizeof(k), "e_%.10s", key);
+    char k[32];
+    snprintf(k, sizeof(k), "%s%.9s", s_pref_prefix, key);
     return phone_pref_get(k, def);
 }
 static void api_pref_set(const char *key, int v)
 {
-    char k[16];
-    snprintf(k, sizeof(k), "e_%.10s", key);
+    char k[32];
+    snprintf(k, sizeof(k), "%s%.9s", s_pref_prefix, key);
     phone_pref_set(k, v);
 }
 
@@ -106,9 +101,9 @@ static void api_led_set(uint32_t rgb, int effect, int period_ms)
                   effect == PHONE_ELF_LED_RAINBOW ? PHONE_LED_RAINBOW : PHONE_LED_SOLID,
         .color = rgb, .period_ms = period_ms > 0 ? period_ms : 1000, .on_ms = 300,
     };
-    phone_led_request(APP_NAME, PHONE_LED_AMBIENT, &p);
+    phone_led_request(s_id, PHONE_LED_AMBIENT, &p);
 }
-static void api_led_off(void) { phone_led_release(APP_NAME); }
+static void api_led_off(void) { phone_led_release(s_id); }
 static int api_imu_read(phone_elf_imu_t *out)
 {
     static bool inited;
@@ -150,7 +145,7 @@ static const phone_elf_api_t s_api = {
     .free_psram = api_free_psram, .free_sram = api_free_sram,
 };
 
-/* libc calls the loader's own table does not export (the app uses them) */
+/* libc calls the loader's own table does not export (the apps use them) */
 static const struct esp_elfsym s_extra_syms[] = {
     ESP_ELFSYM_EXPORT(snprintf), ESP_ELFSYM_EXPORT(fopen), ESP_ELFSYM_EXPORT(fclose), ESP_ELFSYM_EXPORT(fread),
     ESP_ELFSYM_EXPORT(fseek), ESP_ELFSYM_EXPORT(ftell), ESP_ELFSYM_EXPORT(remove), ESP_ELFSYM_EXPORT(memcmp),
@@ -159,20 +154,17 @@ static const struct esp_elfsym s_extra_syms[] = {
     ESP_ELFSYM_END,
 };
 
-/* ---- runner ---- */
-static uint8_t *load_card(size_t *size)
+/* ---- host ---- */
+static uint8_t *read_file(const char *path, size_t *size)
 {
-    if (phone_storage_get(NULL, NULL) != PHONE_STORAGE_MOUNTED) {
-        return NULL;
-    }
-    FILE *f = fopen(SD_PATH, "rb");
+    FILE *f = fopen(path, "rb");
     if (!f) {
         return NULL;
     }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    uint8_t *buf = heap_caps_malloc((sz + 3) & ~3l, MALLOC_CAP_8BIT);
+    uint8_t *buf = sz > 0 ? heap_caps_malloc((sz + 3) & ~3l, MALLOC_CAP_8BIT) : NULL;   /* the loader wants a 4-byte aligned image */
     if (!buf || fread(buf, 1, sz, f) != (size_t)sz) {
         free(buf);
         buf = NULL;
@@ -182,95 +174,86 @@ static uint8_t *load_card(size_t *size)
     return buf;
 }
 
-#define AUTO_CYCLES 20
-
-static void mem_line(const char *tag)
+static void set_err(char *err, size_t len, const char *msg)
 {
-    lv_mem_monitor_t m;
-    lv_mem_monitor(&m);
-    ESP_LOGI(TAG, "MEM %s: PSRAM %u, SRAM %u (largest %u), LVGL free %u used %u", tag,
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL), (unsigned)m.free_size, (unsigned)(m.total_size - m.free_size));
-}
-
-/* One run: load the image, give the app its screen, wait for Close (auto_ms > 0: close after that time), unload. */
-static void run_once(const uint8_t *img, size_t n, int auto_ms)
-{
-    esp_elf_t elf;
-    esp_elf_init(&elf);
-    int64_t t0 = esp_timer_get_time();
-    int r = esp_elf_relocate(&elf, img, n);
-    ESP_LOGI(TAG, "relocate %d, %lld us, runtime base 0x%08x", r, (long long)(esp_timer_get_time() - t0), (unsigned)esp_elf_runtime_base(&elf));
-    if (r == 0 && bsp_display_lock(5000)) {
-        s_close = false;
-        s_root = lv_obj_create(lv_layer_top());
-        lv_obj_set_size(s_root, BSP_LCD_H_RES, BSP_LCD_V_RES);
-        lv_obj_set_style_bg_color(s_root, lv_color_hex(0x101820), 0);
-        lv_obj_set_style_bg_opa(s_root, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(s_root, 0, 0);
-        lv_obj_set_style_pad_all(s_root, 12, 0);
-        lv_obj_set_style_pad_row(s_root, 6, 0);
-        char *argv[] = {(char *)&s_api};
-        t0 = esp_timer_get_time();
-        r = esp_elf_request(&elf, 0, 1, argv);
-        ESP_LOGI(TAG, "request returned %d, %lld us", r, (long long)(esp_timer_get_time() - t0));
-        bsp_display_unlock();
-
-        int limit = auto_ms > 0 ? auto_ms : RUN_MAX_MS;
-        for (int ms = 0; !s_close && ms < limit; ms += 100) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        /* Delete the objects under the LVGL lock: no callback of the app is running or can start after this. */
-        if (bsp_display_lock(5000)) {
-            lv_obj_delete(s_root);
-            s_root = NULL;
-            bsp_display_unlock();
-        }
-        phone_led_release(APP_NAME);
+    if (err && len) {
+        snprintf(err, len, "%s", msg);
     }
-    esp_elf_deinit(&elf);
 }
 
-static void test_task(void *arg)
+int phone_elf_host_open(const char *app_id, const char *elf_path, lv_obj_t *screen,
+                        phone_elf_host_close_cb_t close_cb, void *user, char *err, size_t err_len)
 {
-    vTaskDelay(pdMS_TO_TICKS(25000));   /* the phone has started */
-    ESP_LOGI(TAG, "register extra symbols: %d", esp_elf_register_symbol(s_extra_syms));
-
+    if (s_active) {
+        set_err(err, err_len, "another ELF app is open");
+        return -2;
+    }
+    if (!s_registered) {
+        ESP_LOGI(TAG, "register extra symbols: %d", esp_elf_register_symbol(s_extra_syms));
+        s_registered = true;
+    }
     size_t n = 0;
-    const char *what = "card";
-    uint8_t *img = load_card(&n);
+    uint8_t *img = read_file(elf_path, &n);
     if (!img) {
-        what = "embedded";
-        n = app_test_elf_end - app_test_elf_start;
-        img = heap_caps_malloc((n + 3) & ~3u, MALLOC_CAP_8BIT);   /* the loader wants a 4-byte aligned image */
-        if (img) memcpy(img, app_test_elf_start, n);
+        set_err(err, err_len, "cannot read the ELF file");
+        return -1;
     }
-    if (!img) {
-        vTaskDelete(NULL);
-    }
-    ESP_LOGI(TAG, "[%s] %u bytes", what, (unsigned)n);
-    mem_line("before");
-    run_once(img, n, 1000);
-    mem_line("after manual run");
+    snprintf(s_id, sizeof(s_id), "%s", app_id);
+    snprintf(s_data_dir, sizeof(s_data_dir), "%s/%s", PHONE_SD_APPDATA, app_id);
+    uint32_t h = 2166136261u;
+    for (const char *c = app_id; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
+    snprintf(s_pref_prefix, sizeof(s_pref_prefix), "e%03x_", (unsigned)(h & 0xFFF));
 
-    /* leak check: open and close by itself */
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    mem_line("auto start");
-    for (int i = 1; i <= AUTO_CYCLES; i++) {
-        run_once(img, n, 1000);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        char tag[24];
-        snprintf(tag, sizeof(tag), "cycle %d", i);
-        mem_line(tag);
+    esp_elf_init(&s_elf);
+    int64_t t0 = esp_timer_get_time();
+    int r = esp_elf_relocate(&s_elf, img, n);
+    ESP_LOGI(TAG, "[%s] %u bytes, relocate %d, %lld us, base 0x%08x, free PSRAM %u, LVGL task stack min %u",
+             s_id, (unsigned)n, r, (long long)(esp_timer_get_time() - t0), (unsigned)esp_elf_runtime_base(&s_elf),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    free(img);   /* the loader copied what it needs */
+    if (r != 0) {
+        esp_elf_deinit(&s_elf);
+        set_err(err, err_len, "cannot load the ELF (symbol or format)");
+        return -1;
     }
-    free(img);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    mem_line("auto end");
-    ESP_LOGI(TAG, "done");
-    vTaskDelete(NULL);
+
+    s_root = lv_obj_create(screen);
+    lv_obj_remove_style_all(s_root);
+    lv_obj_set_size(s_root, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_root, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(s_root, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(s_root, 12, 0);
+    lv_obj_set_style_pad_row(s_root, 6, 0);
+    lv_obj_set_style_text_color(s_root, lv_color_hex(0xFFFFFF), 0);
+    s_close_cb = close_cb;
+    s_close_user = user;
+    s_active = true;
+
+    char *argv[] = {(char *)&s_api};
+    t0 = esp_timer_get_time();
+    r = esp_elf_request(&s_elf, 0, 1, argv);
+    ESP_LOGI(TAG, "[%s] entry returned %d, %lld us", s_id, r, (long long)(esp_timer_get_time() - t0));
+    return 0;
 }
 
-void phone_elf_test_start(void)
+void phone_elf_host_close(void)
 {
-    xTaskCreate(test_task, "elftest", 6144, NULL, 3, NULL);
+    if (!s_active) {
+        return;
+    }
+    s_active = false;
+    /* The objects go first, under the LVGL lock the caller holds: no callback of the app runs or can start after this. */
+    if (s_root) {
+        lv_obj_delete(s_root);
+        s_root = NULL;
+    }
+    phone_led_release(s_id);
+    esp_elf_deinit(&s_elf);
+    ESP_LOGI(TAG, "[%s] closed; free PSRAM %u, SRAM %u", s_id, (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+}
+
+bool phone_elf_host_is_open(void)
+{
+    return s_active;
 }
