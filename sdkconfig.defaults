@@ -150,3 +150,6 @@ CONFIG_XIAOZHI_AUDIO_TASK_ALLOC_DYNAMIC=y
 # PSRAM heap read/write only (Instruction access fault when the ELF starts).
 # CONFIG_ESP_SYSTEM_MEMPROT is not set
 # CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT is not set
+
+# PNG icons inside app packages (.bpk)
+CONFIG_LV_USE_LODEPNG=y

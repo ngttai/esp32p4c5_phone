@@ -1,0 +1,15 @@
+{
+  "package": {
+    "id": "app_test",
+    "name": {
+      "en": "App test",
+      "vi": "Thử app"
+    },
+    "version": "0.1.0",
+    "icon": "icon.png"
+  },
+  "runtime": {
+    "type": "ELF",
+    "entry": "app_test.elf"
+  }
+}
