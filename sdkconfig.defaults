@@ -145,3 +145,8 @@ CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
 CONFIG_BSP_DISPLAY_LVGL_TASK_STACK_SIZE=12288
 # SRAM: the Assistant audio task stack (8 KB) only while it runs, not a static buffer kept for ever
 CONFIG_XIAOZHI_AUDIO_TASK_ALLOC_DYNAMIC=y
+
+# ELF loader experiment: code loaded into PSRAM must be executable. The PMP memory protection maps the
+# PSRAM heap read/write only (Instruction access fault when the ELF starts).
+# CONFIG_ESP_SYSTEM_MEMPROT is not set
+# CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT is not set

@@ -19,6 +19,7 @@
 #include "phone_quick.h"
 #include "phone_cell.h"
 #include "phone_boot_splash.h"
+#include "phone_elf_test.h"
 #include "nvs_flash.h"
 #include "boost/thread.hpp"
 #ifdef ESP_UTILS_LOG_TAG
@@ -165,6 +166,7 @@ extern "C" void app_main(void)
         phone_cell_start();
         /* microSD card in the background (never formatted) */
         phone_storage_start();
+        phone_elf_test_start();
         /* Dim / lock screen / screen off on inactivity and on the power key */
         phone_lock_start();
         /* BOOT / IO0 as volume up / down */
