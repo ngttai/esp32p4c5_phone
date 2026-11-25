@@ -11,5 +11,13 @@
   "runtime": {
     "type": "ELF",
     "entry": "app_test.elf"
-  }
+  },
+  "permissions": [
+    "led",
+    "audio",
+    "imu",
+    "battery",
+    "net",
+    "files"
+  ]
 }

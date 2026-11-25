@@ -199,23 +199,28 @@ lv_image_dsc_t *decode_icon(const uint8_t *data, size_t len)
     return dsc;
 }
 
-/* One installed ELF package. Lives as long as the firmware runs (a launcher entry), unless it is uninstalled. */
+/* One installed ELF package. Lives as long as the firmware runs (a launcher entry), unless it is uninstalled.
+ * Several run at the same time: every one has its own instance of the host (image, context, permissions). */
 class ElfApp: public phone::App {
 public:
-    ElfApp(const char *name, const lv_image_dsc_t *icon, std::string id, std::string elf_path):
-        App(name, icon, true, true, phone_nav_bar()), id_(std::move(id)), elf_path_(std::move(elf_path))
+    ElfApp(const char *name, const lv_image_dsc_t *icon, std::string id, std::string elf_path, unsigned perms):
+        App(name, icon, true, true, phone_nav_bar()), id_(std::move(id)), elf_path_(std::move(elf_path)), perms_(perms)
     {
     }
 
 protected:
     bool run() override
     {
-        return open_host();
-    }
-    bool resume() override
-    {
-        // back from the recents after another ELF app took the host: start again
-        return owns_host_ ? true : open_host();
+        char err[64] = {};
+        inst_ = phone_elf_host_open(id_.c_str(), elf_path_.c_str(), perms_, lv_screen_active(), &ElfApp::on_close_request, this, err, sizeof(err));
+        if (!inst_) {
+            ESP_LOGW(TAG, "[%s] cannot open: %s", id_.c_str(), err);
+            lv_obj_t *l = lv_label_create(lv_screen_active());
+            lv_label_set_text_fmt(l, "%s\n%s", id_.c_str(), err);
+            lv_obj_set_style_text_color(l, lv_color_hex(0xFF6060), 0);
+            lv_obj_center(l);
+        }
+        return true;
     }
     bool back() override
     {
@@ -223,13 +228,8 @@ protected:
     }
     bool close() override
     {
-        if (owns_host_) {
-            phone_elf_host_close();
-            owns_host_ = false;
-            if (s_owner == this) {
-                s_owner = nullptr;
-            }
-        }
+        phone_elf_host_close(inst_);
+        inst_ = nullptr;
         return true;
     }
 
@@ -239,39 +239,11 @@ private:
         static_cast<ElfApp *>(user)->notifyCoreClosed();
     }
 
-    /* One ELF runs at a time. An ELF app that is open in the background gives the host up to the one that opens now. */
-    bool open_host()
-    {
-        if (phone_elf_host_is_open() && s_owner && s_owner != this) {
-            ESP_LOGI(TAG, "[%s] takes the host from [%s]", id_.c_str(), s_owner->id_.c_str());
-            phone_elf_host_close();
-            ElfApp *old = s_owner;
-            old->owns_host_ = false;
-            s_owner = nullptr;
-            old->notifyCoreClosed();    // the launcher closes it for good (recents, status bar); its close() finds nothing to unload
-        }
-        char err[64] = {};
-        int r = phone_elf_host_open(id_.c_str(), elf_path_.c_str(), lv_screen_active(), &ElfApp::on_close_request, this, err, sizeof(err));
-        if (r != 0) {
-            ESP_LOGW(TAG, "[%s] cannot open: %s", id_.c_str(), err);
-            lv_obj_t *l = lv_label_create(lv_screen_active());
-            lv_label_set_text_fmt(l, "%s\n%s", id_.c_str(), err);
-            lv_obj_set_style_text_color(l, lv_color_hex(0xFF6060), 0);
-            lv_obj_center(l);
-            owns_host_ = false;
-        } else {
-            owns_host_ = true;
-            s_owner = this;
-        }
-        return true;
-    }
-
-    inline static ElfApp *s_owner = nullptr;
     std::string id_;
     std::string elf_path_;
-    bool owns_host_ = false;
+    unsigned perms_;
+    phone_elf_inst_t *inst_ = nullptr;
 };
-
 
 struct Package {
     std::string folder;     // folder name under userapps/ or packages/
@@ -282,6 +254,7 @@ struct Package {
     std::string dir;        // folder of the package (empty inside a .bpk)
     std::string icon_file;  // package.icon, "icon.png" when the manifest does not say
     lv_image_dsc_t *icon = nullptr;   // its icon when it could be read (a package waiting in packages/)
+    unsigned permissions = 0;         // PHONE_ELF_PERM_* from "permissions"
 };
 
 std::string read_text(const std::string &path)
@@ -366,6 +339,18 @@ bool parse_manifest(const std::string &text, const std::string &folder, const st
         out.id = id->valuestring;
         out.elf_path = dir + "/" + entry->valuestring;
         out.name = out.id;
+        cJSON *perms = cJSON_GetObjectItem(root, "permissions");
+        if (cJSON_IsArray(perms)) {
+            cJSON *it;
+            cJSON_ArrayForEach(it, perms) {
+                const unsigned bit = cJSON_IsString(it) ? phone_elf_host_parse_permission(it->valuestring) : 0;
+                if (bit) {
+                    out.permissions |= bit;
+                } else {
+                    ESP_LOGW(TAG, "%s: unknown permission, ignored", folder.c_str());
+                }
+            }
+        }
         cJSON *icon = cJSON_GetObjectItem(pkg, "icon");
         out.icon_file = (cJSON_IsString(icon) && safe_relative(icon->valuestring)) ? icon->valuestring : "icon.png";
         cJSON *ver = cJSON_GetObjectItem(pkg, "version");
@@ -485,14 +470,14 @@ std::string install_folder(const std::string &folder)
     if (!meta.icon || !meta.name) {
         return "out of memory";
     }
-    auto *app = new ElfApp(meta.name, meta.icon, p.id, p.elf_path);
+    auto *app = new ElfApp(meta.name, meta.icon, p.id, p.elf_path, p.permissions);
     int id = s_phone->installApp(app);
     if (id < 0) {
         delete app;
         return "the launcher refused it";
     }
     s_installed[p.id] = Installed{app, id, folder};
-    ESP_LOGI(TAG, "installed '%s' (%s) as app %d", meta.name, p.id.c_str(), id);
+    ESP_LOGI(TAG, "installed '%s' (%s) as app %d, permissions 0x%x", meta.name, p.id.c_str(), id, p.permissions);
     return "";
 }
 
