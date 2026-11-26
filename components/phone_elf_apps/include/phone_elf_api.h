@@ -60,6 +60,17 @@ typedef struct {
     bool charging_usb;  /* USB supply present */
 } phone_elf_battery_t;
 
+/* life cycle: handlers the app registers with lifecycle_set(). They run on the LVGL task, like the callbacks of events and timers. */
+#define PHONE_ELF_LC_KEEP_TIMERS (1u << 0)  /* the timers of the app keep running while it is in the background (default: paused) */
+
+typedef struct {
+    void (*on_pause)(void *user);   /* the app goes to the background (Home, another app opens). The screen stays alive. */
+    void (*on_resume)(void *user);  /* the app comes back to the foreground */
+    void (*on_close)(void *user);   /* the app is closed for good: save state here (pref_set, files); the screen is still there, it is deleted right after */
+    void *user;                     /* passed to the three handlers */
+    uint32_t flags;                 /* PHONE_ELF_LC_* */
+} phone_elf_lifecycle_t;
+
 typedef struct {
     uint32_t size;      /* sizeof of this table in the firmware */
     uint32_t version;   /* PHONE_ELF_API_VERSION */
@@ -127,6 +138,10 @@ typedef struct {
 
     /* files: the folder of the installed package (/sdcard/userapps/<id>), read only: its res/, icon, data files */
     const char *(*pkg_dir)(phone_elf_ctx_t *ctx);
+
+    /* life cycle (pause / resume are not sent when the screen turns off or locks: the app stays in the foreground) */
+    int (*lifecycle_set)(phone_elf_ctx_t *ctx, const phone_elf_lifecycle_t *handlers);   /* copied; NULL members are fine */
+    bool (*is_foreground)(phone_elf_ctx_t *ctx);
 } phone_elf_api_t;
 
 /* in the app: is a member there in the firmware that runs it? */

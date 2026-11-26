@@ -222,6 +222,16 @@ protected:
         }
         return true;
     }
+    bool pause() override
+    {
+        phone_elf_host_pause(inst_);
+        return true;
+    }
+    bool resume() override
+    {
+        phone_elf_host_resume(inst_);
+        return true;
+    }
     bool back() override
     {
         return notifyCoreClosed();

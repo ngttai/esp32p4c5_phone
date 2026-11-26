@@ -44,6 +44,8 @@ typedef struct {
 struct phone_elf_inst {
     uint32_t magic;
     bool closing;
+    bool paused;                            /* in the background */
+    phone_elf_lifecycle_t lc;               /* the handlers the app registered */
     esp_elf_t elf;
     lv_obj_t *root;
     unsigned perms;
@@ -314,6 +316,14 @@ static int api_battery_read(phone_elf_ctx_t *ctx, phone_elf_battery_t *out)
 static int api_net_online(phone_elf_ctx_t *ctx) { return G(PHONE_ELF_PERM_NET) ? (phone_net_online() ? 1 : 0) : PHONE_ELF_E_PERM; }
 static uint32_t api_free_psram(phone_elf_ctx_t *ctx) { (void)ctx; return heap_caps_get_free_size(MALLOC_CAP_SPIRAM); }
 static uint32_t api_free_sram(phone_elf_ctx_t *ctx) { (void)ctx; return heap_caps_get_free_size(MALLOC_CAP_INTERNAL); }
+static int api_lifecycle_set(phone_elf_ctx_t *ctx, const phone_elf_lifecycle_t *h)
+{
+    phone_elf_inst_t *in = G(0);
+    if (!in || !h) return PHONE_ELF_E_ARG;
+    in->lc = *h;
+    return 0;
+}
+static bool api_is_foreground(phone_elf_ctx_t *ctx) { phone_elf_inst_t *in = G(0); return in && !in->paused; }
 static const char *api_pkg_dir(phone_elf_ctx_t *ctx) { phone_elf_inst_t *in = G(0); return in ? in->pkg_dir : ""; }
 
 static const phone_elf_api_t s_api = {
@@ -335,6 +345,7 @@ static const phone_elf_api_t s_api = {
     .imu_read = api_imu_read, .battery_read = api_battery_read, .net_online = api_net_online,
     .free_psram = api_free_psram, .free_sram = api_free_sram,
     .pkg_dir = api_pkg_dir,
+    .lifecycle_set = api_lifecycle_set, .is_foreground = api_is_foreground,
 };
 
 unsigned phone_elf_host_parse_permission(const char *name)
@@ -450,11 +461,51 @@ phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, 
     return in;
 }
 
+/* run a handler of the app: the app is "current" while it runs */
+static void run_handler(phone_elf_inst_t *in, void (*h)(void *))
+{
+    if (!h) return;
+    phone_elf_inst_t *prev = s_current;
+    s_current = in;
+    h(in->lc.user);
+    s_current = prev;
+}
+
+void phone_elf_host_pause(phone_elf_inst_t *in)
+{
+    if (!in || !get((phone_elf_ctx_t *)in) || in->paused) {
+        return;
+    }
+    in->paused = true;
+    if (!(in->lc.flags & PHONE_ELF_LC_KEEP_TIMERS)) {
+        for (int i = 0; i < MAX_TIMERS; i++) {
+            if (in->timers[i].timer) lv_timer_pause(in->timers[i].timer);
+        }
+    }
+    ESP_LOGI(TAG, "[%s] pause", in->id);
+    run_handler(in, in->lc.on_pause);
+}
+
+void phone_elf_host_resume(phone_elf_inst_t *in)
+{
+    if (!in || !get((phone_elf_ctx_t *)in) || !in->paused) {
+        return;
+    }
+    in->paused = false;
+    for (int i = 0; i < MAX_TIMERS; i++) {
+        if (in->timers[i].timer) lv_timer_resume(in->timers[i].timer);
+    }
+    ESP_LOGI(TAG, "[%s] resume", in->id);
+    run_handler(in, in->lc.on_resume);
+}
+
 void phone_elf_host_close(phone_elf_inst_t *in)
 {
     if (!in || !get((phone_elf_ctx_t *)in)) {
         return;
     }
+    ESP_LOGI(TAG, "[%s] closing", in->id);
+    run_handler(in, in->lc.on_close);     /* the app can still use the API here: save its state */
     in->closing = true;     /* from now on every call of the app is refused */
     /* Timers and objects go first, under the LVGL lock the caller holds: no callback of the app runs or can start after this. */
     for (int i = 0; i < MAX_TIMERS; i++) {

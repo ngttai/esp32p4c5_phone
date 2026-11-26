@@ -13,11 +13,15 @@ static int s_zero[64];                  /* .bss */
 static char s_text[1800];
 static int s_pos;
 static int s_pass, s_fail;
-static void *s_click_label, *s_slider_label, *s_led_label, *s_tick_label, *s_switch_label;
+static void *s_click_label, *s_slider_label, *s_led_label, *s_tick_label, *s_switch_label, *s_life_label;
+static int s_pauses, s_resumes;
 static int s_clicks, s_led_step, s_ticks;
 static uint32_t s_perms;
 
 static void on_tick(void *user);
+static void on_pause(void *user);
+static void on_resume(void *user);
+static void on_close_life(void *user);
 
 static void check(const char *name, bool ok, const char *info)
 {
@@ -140,6 +144,10 @@ static void run_tests(void)
     snprintf(info, sizeof(info), "r=%d", r);
     check("perm led", perm_ok(PHONE_ELF_PERM_LED, r), info);
 
+    /* life cycle: pause / resume / close handlers (timers pause by themselves in the background) */
+    static const phone_elf_lifecycle_t lc = {.on_pause = on_pause, .on_resume = on_resume, .on_close = on_close_life, .user = 0, .flags = 0};
+    check("lifecycle set", A->lifecycle_set(C, &lc) == 0 && A->is_foreground(C), "handlers registered, foreground");
+
     /* UI helpers the screen below uses */
     check("timer create", A->timer_create(C, 500, on_tick, 0) != NULL, "every 500 ms, the host deletes it on close");
 }
@@ -181,6 +189,35 @@ static void on_tick(void *user)
     (void)user;
     char b[48]; snprintf(b, sizeof(b), "timer ticks: %d", ++s_ticks);
     A->label_set_text(C, s_tick_label, b);
+}
+static void show_life(void)
+{
+    char b[96];
+    snprintf(b, sizeof(b), "pauses %d, resumes %d, closes saved %d (ticks %d at the last close)", s_pauses, s_resumes,
+             (int)A->pref_get(C, "closes", 0), (int)A->pref_get(C, "lastticks", 0));
+    if (s_life_label) A->label_set_text(C, s_life_label, b);
+}
+static void on_pause(void *user)
+{
+    (void)user;
+    s_pauses++;
+    printf("app_test: on_pause ticks=%d foreground=%d\n", s_ticks, A->is_foreground(C));
+    show_life();
+}
+static void on_resume(void *user)
+{
+    (void)user;
+    s_resumes++;
+    printf("app_test: on_resume ticks=%d foreground=%d\n", s_ticks, A->is_foreground(C));
+    show_life();
+}
+static void on_close_life(void *user)
+{
+    (void)user;
+    int n = A->pref_get(C, "closes", 0) + 1;
+    A->pref_set(C, "closes", n);
+    A->pref_set(C, "lastticks", s_ticks);
+    printf("app_test: on_close ticks=%d saved closes=%d\n", s_ticks, n);
 }
 static void on_close(void *e) { (void)e; A->close(C); }
 
@@ -228,6 +265,8 @@ int main(int argc, char *argv[])
     A->label_set_text(C, s_slider_label, "slider: 0");
     s_switch_label = A->label_create(C, root);
     A->label_set_text(C, s_switch_label, "switch: off");
+    s_life_label = A->label_create(C, root);
+    show_life();
 
     void *sl = A->slider_create(C, root);
     A->obj_set_size(C, sl, -90, 20);

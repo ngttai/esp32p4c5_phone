@@ -23,8 +23,12 @@ typedef void (*phone_elf_host_close_cb_t)(void *user);
 phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, unsigned perms, lv_obj_t *screen,
                                       phone_elf_host_close_cb_t close_cb, void *user, char *err, size_t err_len);
 
-/** Delete its timers and container, let the LED go, unload the ELF, free the instance. NULL is fine. */
+/** Run its on_close handler, delete its timers and container, let the LED go, unload the ELF, free the instance. NULL is fine. */
 void phone_elf_host_close(phone_elf_inst_t *inst);
+
+/** The app goes to the background / comes back: runs its handlers and pauses / resumes its timers. NULL is fine. */
+void phone_elf_host_pause(phone_elf_inst_t *inst);
+void phone_elf_host_resume(phone_elf_inst_t *inst);
 
 /** Number of apps loaded now. */
 int phone_elf_host_count(void);
