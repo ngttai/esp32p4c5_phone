@@ -1,5 +1,7 @@
 # SDK of the ELF apps (API v3)
 
+English · [Tiếng Việt](README.vi.md). Full documentation: [`docs/elf_apps/`](../docs/elf_apps/README.md) (overview, [API reference](../docs/elf_apps/api.md), [package format](../docs/elf_apps/package.md), [troubleshooting](../docs/elf_apps/troubleshooting.md)).
+
 An app is an ELF loaded into PSRAM by the phone, packed with its `manifest.json` into a `.bpk`. Copy the `.bpk` to `/packages/` on
 the memory card, open **Ứng dụng** (Apps) on the phone and press **Cài** (Install): the app appears on the launcher.
 

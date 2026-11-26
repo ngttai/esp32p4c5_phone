@@ -15,8 +15,9 @@
  *  - Files: fopen / remove / rename (libc names, sandboxed by the host) reach app_dir() with PERM_FILES, and pkg_dir() read only.
  *    Every other path is refused (NULL / error).
  *  - Calls of a group the manifest did not ask for (`"permissions"`) fail with PHONE_ELF_E_PERM and do nothing.
- *    Permissions are a declaration checked by the host, not a sandbox: an ELF can still call any libc or IDF
- *    function the loader exports. Install packages you trust.
+ *    Permissions and the symbol list stop mistakes and casual misuse, not a hostile ELF: there is no MMU and the memory
+ *    protection is off, so an ELF can still read and write any memory. Install packages you trust.
+ *  - Documentation: docs/elf_apps/ (overview, API reference, package format, troubleshooting).
  *  - Never remove or reorder a member: add at the end and raise PHONE_ELF_API_VERSION. `size` is the size of the
  *    table of the firmware: an app that uses a member added later checks `size` first (PHONE_ELF_HAS).
  */

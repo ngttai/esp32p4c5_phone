@@ -11,6 +11,7 @@ component manager). It was the `examples/phone` of that repository until v0.1.0 
 - **Apps**: Level, Camera, Gallery, Weather, Music, Radio, Recorder, LED RGB, Video, Files (and USB drive), Second screen, USB camera, AI Assistant, Calculator, 2048.
 - **Connectivity**: Wi-Fi through the ESP32-C5 (ESP-Hosted) and 4G through the ML307C module, with Wi-Fi first.
 - **microSD**: mounted at `/sdcard` at boot, never formatted.
+- **ELF apps from the card**: install `.bpk` packages with the Apps app, no rebuild, no flash (see below).
 
 | Lock screen | Launcher | Settings |
 |---|---|---|
@@ -25,6 +26,13 @@ component manager). It was the `examples/phone` of that repository until v0.1.0 
 - [docs/features.md](docs/features.md): every app and system behavior in detail (settings, media apps, keys, microSD layout).
 - [docs/4g.md](docs/4g.md): mobile data (module, PPP, Wi-Fi first, speed, data counter).
 - [docs/architecture.md](docs/architecture.md): source layout, configuration and implementation notes.
+- [docs/elf_apps/](docs/elf_apps/README.md): ELF apps from the card: overview, API reference, package format, troubleshooting (English and Vietnamese).
+
+## ELF apps from the memory card
+
+Copy a `.bpk` package (a ZIP with `manifest.json`, an ELF and an icon) to `/packages/` on the card, open the **Apps** app, press **Install**, and a new icon appears on the launcher. Native RISC-V code is loaded into PSRAM by `espressif/elf_loader`; several apps run at once through a small versioned C API (version 3) with permissions declared in the manifest. Build one with the standalone SDK: `cd sdk && make APP=examples/hello` gives `out/hello.bpk`. Sample packages are in `sdcard/packages/`.
+
+**Security**: there is no MMU and `CONFIG_ESP_SYSTEM_MEMPROT` is off. The permissions and the symbol list stop mistakes, **not** a hostile ELF: install only packages you trust.
 
 ## Requirements
 
