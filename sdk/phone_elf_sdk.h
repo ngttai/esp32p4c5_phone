@@ -58,6 +58,7 @@ static inline void ui_pos(void *obj, int x, int y) { PHONE(obj_set_pos, obj, x, 
 static inline void ui_align(void *obj, int align, int x, int y) { PHONE(obj_align, obj, align, x, y); }
 static inline void ui_bg(void *obj, uint32_t rgb) { PHONE(obj_set_bg_color, obj, rgb); }
 static inline void ui_color(void *obj, uint32_t rgb) { PHONE(obj_set_text_color, obj, rgb); }
+static inline void ui_font_size(void *obj, int px) { PHONE(obj_set_font_size, obj, px); }   /* 12..28, default 16 */
 static inline void ui_radius(void *obj, int r) { PHONE(obj_set_radius, obj, r); }
 static inline void ui_hide(void *obj, bool hidden) { PHONE(obj_set_hidden, obj, hidden); }
 static inline void ui_column(void *obj) { PHONE(obj_set_flex_column, obj); }

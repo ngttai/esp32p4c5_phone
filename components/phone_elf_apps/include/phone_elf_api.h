@@ -143,6 +143,9 @@ typedef struct {
     /* life cycle (pause / resume are not sent when the screen turns off or locks: the app stays in the foreground) */
     int (*lifecycle_set)(phone_elf_ctx_t *ctx, const phone_elf_lifecycle_t *handlers);   /* copied; NULL members are fine */
     bool (*is_foreground)(phone_elf_ctx_t *ctx);
+
+    /* text size in pixels, 12..28 (Vietnamese glyphs included); the default of an app is 16, an object inherits it from its parent */
+    void (*obj_set_font_size)(phone_elf_ctx_t *ctx, void *obj, int px);
 } phone_elf_api_t;
 
 /* in the app: is a member there in the firmware that runs it? */

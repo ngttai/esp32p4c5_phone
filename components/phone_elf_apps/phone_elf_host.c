@@ -15,6 +15,7 @@
 #include "phone_elf_host.h"
 #include "phone_paths.h"
 #include "phone_locale.h"
+#include "phone_fonts.h"
 #include "phone_audio.h"
 #include "phone_led.h"
 #include "phone_power.h"
@@ -135,6 +136,13 @@ static void api_obj_align(phone_elf_ctx_t *ctx, void *o, int a, int x, int y)
 }
 static void api_obj_set_bg_color(phone_elf_ctx_t *ctx, void *o, uint32_t rgb) { if (G(0) && o) { lv_obj_set_style_bg_color(o, lv_color_hex(rgb), 0); lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0); } }
 static void api_obj_set_text_color(phone_elf_ctx_t *ctx, void *o, uint32_t rgb) { if (G(0) && o) lv_obj_set_style_text_color(o, lv_color_hex(rgb), 0); }
+static void api_obj_set_font_size(phone_elf_ctx_t *ctx, void *o, int px)
+{
+    if (!G(0) || !o) return;
+    if (px < 12) px = 12;
+    if (px > 28) px = 28;
+    lv_obj_set_style_text_font(o, phone_font_by_size(px), 0);
+}
 static void api_obj_set_radius(phone_elf_ctx_t *ctx, void *o, int r) { if (G(0) && o) lv_obj_set_style_radius(o, r, 0); }
 static void api_obj_set_hidden(phone_elf_ctx_t *ctx, void *o, bool hidden)
 {
@@ -362,6 +370,7 @@ static const phone_elf_api_t s_api = {
     .free_psram = api_free_psram, .free_sram = api_free_sram,
     .pkg_dir = api_pkg_dir,
     .lifecycle_set = api_lifecycle_set, .is_foreground = api_is_foreground,
+    .obj_set_font_size = api_obj_set_font_size,
 };
 
 unsigned phone_elf_host_parse_permission(const char *name)
@@ -461,6 +470,7 @@ phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, 
     lv_obj_set_style_pad_all(in->root, 12, 0);
     lv_obj_set_style_pad_row(in->root, 6, 0);
     lv_obj_set_style_text_color(in->root, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(in->root, phone_font_by_size(16), 0);     /* Vietnamese glyphs: the default font of LVGL has none */
     in->close_cb = close_cb;
     in->close_user = user;
     s_insts[slot] = in;

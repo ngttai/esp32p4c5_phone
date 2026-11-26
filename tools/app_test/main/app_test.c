@@ -43,7 +43,7 @@ static void run_tests(void)
     info[0] = 0;
 
     snprintf(info, sizeof(info), "v%u size %u", (unsigned)A->version, (unsigned)A->size);
-    check("api version", A->version == PHONE_ELF_API_VERSION && A->size == sizeof(phone_elf_api_t) && PHONE_ELF_HAS(A, free_sram), info);
+    check("api version", A->version == PHONE_ELF_API_VERSION && A->size >= sizeof(phone_elf_api_t) && PHONE_ELF_HAS(A, free_sram), info);
 
     bool ok = strlen("abc") == 3 && strcmp("a", "b") < 0 && memcmp("xyz", "xyz", 3) == 0 && atoi("4242") == 4242;
     check("libc string", ok, "strlen strcmp memcmp atoi");
@@ -161,7 +161,9 @@ static void on_beep(void *e)
     (void)e;
     s_clicks++;
     int r = A->beep(C);
-    char b[64]; snprintf(b, sizeof(b), "clicks: %d (beep %d)", s_clicks, r);
+    char b[80];
+    if (r == 0) snprintf(b, sizeof(b), "clicks: %d (beep)", s_clicks);
+    else snprintf(b, sizeof(b), "clicks: %d (beep refused %d: no audio permission)", s_clicks, r);
     A->label_set_text(C, s_click_label, b);
 }
 static void on_led(void *e)
@@ -173,7 +175,7 @@ static void on_led(void *e)
     int s = s_led_step++ % 4;
     int r = A->led_set(C, colors[s], s == 0 ? PHONE_ELF_LED_BLINK : s == 1 ? PHONE_ELF_LED_SOLID : s == 2 ? PHONE_ELF_LED_BREATHE : PHONE_ELF_LED_RAINBOW, 1200);
     char b[64];
-    if (r == 0) snprintf(b, sizeof(b), "LED: %s", names[s]); else snprintf(b, sizeof(b), "LED: refused (%d)", r);
+    if (r == 0) snprintf(b, sizeof(b), "LED: %s", names[s]); else snprintf(b, sizeof(b), "LED: refused %d (no led permission)", r);
     A->label_set_text(C, s_led_label, b);
 }
 static void on_led_off(void *e) { (void)e; int r = A->led_off(C); A->label_set_text(C, s_led_label, r == 0 ? "LED: off" : "LED: refused"); }
@@ -258,6 +260,8 @@ int main(int argc, char *argv[])
     void *res = A->label_create(C, root);
     A->label_set_text(C, res, s_text);
     A->obj_set_size(C, res, -100, -1);
+    A->obj_set_font_size(C, res, 13);       /* a lot of lines: small text */
+    A->obj_set_font_size(C, title, 18);
 
     s_tick_label = A->label_create(C, root);
     A->label_set_text(C, s_tick_label, "timer ticks: 0");

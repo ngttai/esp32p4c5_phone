@@ -50,6 +50,7 @@ int main(int argc, char *argv[])
     void *title = ui_label(root);
     ui_text(title, app_tr("Xin chào từ một ứng dụng ELF", "Hello from an ELF app"));
     ui_color(title, 0x60D0FF);
+    ui_font_size(title, 22);
 
     s_count = pref_int("count", 0);
     s_count_label = ui_label(root);
