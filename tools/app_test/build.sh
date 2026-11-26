@@ -14,3 +14,12 @@ cp icon_b.png "$B/icon.png"
 cp manifest_b.json "$B/manifest.json"
 python3 ../make_bpk.py "$B" ../../sdcard/packages/app_test_b.bpk
 rm -rf "$B"
+
+# the SDK example (its own build, no IDF project) and a package of an old API that the phone must refuse
+make -C ../../sdk APP=examples/hello >/dev/null
+cp ../../sdk/out/hello.bpk ../../sdcard/packages/hello.bpk
+O="$(mktemp -d)"
+cp ../../sdk/build/hello.elf "$O/"
+sed 's/"hello_sdk"/"hello_old"/; s/"api": 3/"api": 2/; s/"Hello"/"Hello old"/; s/"Xin chào"/"Cũ"/' ../../sdk/examples/hello/manifest.json > "$O/manifest.json"
+python3 ../make_bpk.py "$O" ../../sdcard/packages/hello_old.bpk
+rm -rf "$O"

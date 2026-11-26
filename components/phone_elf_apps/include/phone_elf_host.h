@@ -26,6 +26,9 @@ phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, 
 /** Run its on_close handler, delete its timers and container, let the LED go, unload the ELF, free the instance. NULL is fine. */
 void phone_elf_host_close(phone_elf_inst_t *inst);
 
+/** Erase the settings (NVS) of an app, e.g. when it is removed. */
+void phone_elf_host_erase_data(const char *app_id);
+
 /** The app goes to the background / comes back: runs its handlers and pauses / resumes its timers. NULL is fine. */
 void phone_elf_host_pause(phone_elf_inst_t *inst);
 void phone_elf_host_resume(phone_elf_inst_t *inst);

@@ -10,7 +10,8 @@
   },
   "runtime": {
     "type": "ELF",
-    "entry": "app_test.elf"
+    "entry": "app_test.elf",
+    "api": 3
   },
   "permissions": [
     "led",

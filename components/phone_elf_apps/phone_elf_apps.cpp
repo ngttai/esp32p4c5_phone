@@ -25,6 +25,7 @@
 #include "bsp/esp-bsp.h"
 #include "esp_brookesia.hpp"
 #include "phone_elf_apps.h"
+#include "phone_elf_api.h"
 #include "phone_elf_host.h"
 #include "phone_fonts.h"
 #include "phone_locale.h"
@@ -265,6 +266,7 @@ struct Package {
     std::string icon_file;  // package.icon, "icon.png" when the manifest does not say
     lv_image_dsc_t *icon = nullptr;   // its icon when it could be read (a package waiting in packages/)
     unsigned permissions = 0;         // PHONE_ELF_PERM_* from "permissions"
+    int api = 0;                      // runtime.api: the API version the ELF was built for (0 = not said)
 };
 
 std::string read_text(const std::string &path)
@@ -349,6 +351,8 @@ bool parse_manifest(const std::string &text, const std::string &folder, const st
         out.id = id->valuestring;
         out.elf_path = dir + "/" + entry->valuestring;
         out.name = out.id;
+        cJSON *api = cJSON_GetObjectItem(rt, "api");
+        out.api = cJSON_IsNumber(api) ? api->valueint : 0;
         cJSON *perms = cJSON_GetObjectItem(root, "permissions");
         if (cJSON_IsArray(perms)) {
             cJSON *it;
@@ -433,6 +437,18 @@ void remove_dir(const std::string &path, int depth = 0)
     rmdir(path.c_str());
 }
 
+/* why a package of another API version is refused */
+std::string api_note(int api)
+{
+    char b[64];
+    if (api == 0) {
+        snprintf(b, sizeof(b), "no runtime.api, this phone needs v%d", PHONE_ELF_API_VERSION);
+    } else {
+        snprintf(b, sizeof(b), "built for API v%d, this phone has v%d", api, PHONE_ELF_API_VERSION);
+    }
+    return b;
+}
+
 /* ---- the installed packages ---- */
 struct Installed {
     ElfApp *app;
@@ -459,6 +475,9 @@ std::string install_folder(const std::string &folder)
     }
     if (s_installed.count(p.id)) {
         return "already installed";
+    }
+    if (p.api != PHONE_ELF_API_VERSION) {
+        return api_note(p.api);
     }
     auto &meta = s_meta[p.id];
     if (!meta.icon || !meta.from_package) {        // the icon of the package, else the drawn one
@@ -497,7 +516,7 @@ bool is_running(int app_id)
 }
 
 /* Remove the app and its folder. Empty string = done, else the reason. */
-std::string uninstall_package(const std::string &pkg_id)
+std::string uninstall_package(const std::string &pkg_id, bool wipe_data)
 {
     auto it = s_installed.find(pkg_id);
     if (it == s_installed.end()) {
@@ -514,7 +533,11 @@ std::string uninstall_package(const std::string &pkg_id)
     delete app;
     s_installed.erase(it);
     remove_dir(std::string(USERAPPS_DIR) + "/" + folder);
-    ESP_LOGI(TAG, "uninstalled %s", pkg_id.c_str());
+    if (wipe_data) {
+        phone_elf_host_erase_data(pkg_id.c_str());
+        remove_dir(std::string(PHONE_SD_APPDATA) + "/" + pkg_id);
+    }
+    ESP_LOGI(TAG, "uninstalled %s%s", pkg_id.c_str(), wipe_data ? " and its data" : ", data kept");
     return "";
 }
 
@@ -584,6 +607,9 @@ std::string install_from_bpk(const std::string &file)
     if (s_installed.count(p.id)) {
         return "already installed";
     }
+    if (p.api != PHONE_ELF_API_VERSION) {
+        return api_note(p.api);
+    }
     mkdir(USERAPPS_DIR, 0775);
     const std::string dst = std::string(USERAPPS_DIR) + "/" + p.id;
     const std::string tmp = dst + ".tmp";
@@ -646,10 +672,11 @@ private:
         rebuild();
     }
 
+    enum Kind { INSTALLED, AVAILABLE, BROKEN, TOO_OLD };   // BROKEN: in userapps/ but not loaded; TOO_OLD: a .bpk of another API version
     struct Row {
         std::string id;
         std::string folder;
-        bool installed;
+        Kind kind;
     };
     inline static lv_obj_t *s_root = nullptr;
     inline static lv_obj_t *s_list = nullptr;
@@ -658,7 +685,8 @@ private:
     inline static std::string s_status;
     inline static int s_confirm = -1;           // row waiting for the second tap of "remove"
     inline static lv_timer_t *s_confirm_timer = nullptr;
-    friend void make_manager_row(const Package &p, bool installed, int idx);
+    inline static bool s_wipe = true;           // remove the data of the app (settings, appdata/<id>) with it
+    friend void make_manager_row(const Package &p, ElfAppManager::Kind kind, int idx, const std::string &note);
 };
 
 lv_obj_t *plain(lv_obj_t *parent)
@@ -703,6 +731,19 @@ void ElfAppManager::build()
     lv_obj_t *bl = text(btn, phone_tr("Làm mới", "Refresh"), 18, C_TEXT);
     lv_obj_center(bl);
 
+    lv_obj_t *wipe_row = plain(root);
+    lv_obj_set_size(wipe_row, LV_PCT(100), 44);
+    lv_obj_set_flex_flow(wipe_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wipe_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    text(wipe_row, phone_tr("Xóa cả dữ liệu khi gỡ", "Delete the data too when removing"), 16, C_SUB);
+    lv_obj_t *wipe_sw = lv_switch_create(wipe_row);
+    if (s_wipe) {
+        lv_obj_add_state(wipe_sw, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(wipe_sw, [](lv_event_t *e) {
+        s_wipe = lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED);
+    }, LV_EVENT_VALUE_CHANGED, nullptr);
+
     s_status_label = text(root, "", 16, C_SUB);
     lv_obj_set_width(s_status_label, LV_PCT(100));
 
@@ -716,8 +757,9 @@ void ElfAppManager::build()
     rebuild();
 }
 
-void make_manager_row(const Package &p, bool installed, int idx)
+void make_manager_row(const Package &p, ElfAppManager::Kind kind, int idx, const std::string &note)
 {
+    const bool installed = kind == ElfAppManager::INSTALLED;
     lv_obj_t *card = plain(ElfAppManager::s_list);
     lv_obj_set_size(card, LV_PCT(100), 84);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
@@ -750,13 +792,23 @@ void make_manager_row(const Package &p, bool installed, int idx)
     text(col, p.name.c_str(), 20, C_TEXT);
     std::string sub = p.id + (p.version.empty() ? "" : "  v" + p.version);
     text(col, sub.c_str(), 15, C_SUB);
+    if (!note.empty()) {
+        lv_obj_t *n = text(col, note.c_str(), 14, C_WARN);
+        lv_obj_set_width(n, LV_PCT(100));
+    }
 
     lv_obj_t *btn = lv_button_create(card);
     lv_obj_set_size(btn, 110, 46);
-    const bool confirming = installed && ElfAppManager::s_confirm == idx;
-    lv_obj_set_style_bg_color(btn, lv_color_hex(installed ? (confirming ? C_WARN : 0x3A4450) : C_OK), 0);
+    const bool removable = kind == ElfAppManager::INSTALLED || kind == ElfAppManager::BROKEN;
+    const bool confirming = removable && ElfAppManager::s_confirm == idx;
+    lv_obj_set_style_bg_color(btn, lv_color_hex(kind == ElfAppManager::TOO_OLD ? 0x2A323A : removable ? (confirming ? C_WARN : 0x3A4450) : C_OK), 0);
+    if (kind == ElfAppManager::TOO_OLD) {
+        lv_obj_add_state(btn, LV_STATE_DISABLED);
+    }
     lv_obj_add_event_cb(btn, ElfAppManager::on_action, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<intptr_t>(idx)));
-    const char *label = installed ? (confirming ? phone_tr("Chắc chắn?", "Sure?") : phone_tr("Gỡ", "Remove")) : phone_tr("Cài", "Install");
+    const char *label = kind == ElfAppManager::TOO_OLD ? phone_tr("Cũ", "Old") :
+                        removable ? (confirming ? phone_tr("Chắc chắn?", "Sure?") : (kind == ElfAppManager::BROKEN ? phone_tr("Xóa", "Delete") : phone_tr("Gỡ", "Remove"))) :
+                        phone_tr("Cài", "Install");
     lv_obj_t *l = text(btn, label, 18, C_TEXT);
     lv_obj_center(l);
 }
@@ -773,14 +825,15 @@ void ElfAppManager::rebuild()
     auto repo = scan_bpk();
     int idx = 0;
     bool any = false;
-    lv_obj_t *h = text(s_list, phone_tr("Đã cài", "Installed"), 18, C_OK2);
-    (void)h;
+    text(s_list, phone_tr("Đã cài", "Installed"), 18, C_OK2);
     for (auto &p : installed) {
-        if (!s_installed.count(p.id)) {
-            continue;       // in userapps/ but not loaded (wrong manifest, or added after the start: Install does not apply)
+        const bool loaded = s_installed.count(p.id) > 0;
+        s_rows.push_back({p.id, p.folder, loaded ? INSTALLED : BROKEN});
+        std::string note;
+        if (!loaded) {
+            note = p.api != PHONE_ELF_API_VERSION ? api_note(p.api) : std::string(phone_tr("chưa nạp (trùng id hoặc lỗi)", "not loaded (id used or error)"));
         }
-        s_rows.push_back({p.id, p.folder, true});
-        make_manager_row(p, true, idx++);
+        make_manager_row(p, loaded ? INSTALLED : BROKEN, idx++, note);
         any = true;
     }
     if (!any) {
@@ -792,8 +845,9 @@ void ElfAppManager::rebuild()
         if (s_installed.count(p.id)) {
             continue;
         }
-        s_rows.push_back({p.id, p.folder, false});
-        make_manager_row(p, false, idx++);
+        const bool ok = p.api == PHONE_ELF_API_VERSION;
+        s_rows.push_back({p.id, p.folder, ok ? AVAILABLE : TOO_OLD});
+        make_manager_row(p, ok ? AVAILABLE : TOO_OLD, idx++, ok ? std::string() : api_note(p.api));
         any_repo = true;
     }
     if (!any_repo) {
@@ -811,7 +865,10 @@ void ElfAppManager::on_action(lv_event_t *e)
         return;
     }
     const Row row = s_rows[idx];
-    if (row.installed) {
+    if (row.kind == TOO_OLD) {
+        return;
+    }
+    if (row.kind == INSTALLED || row.kind == BROKEN) {
         if (s_confirm != idx) {         // first tap: ask again within 3 s
             s_confirm = idx;
             if (s_confirm_timer) {
@@ -833,7 +890,13 @@ void ElfAppManager::on_action(lv_event_t *e)
             lv_timer_delete(s_confirm_timer);
             s_confirm_timer = nullptr;
         }
-        std::string err = uninstall_package(row.id);
+        std::string err;
+        if (row.kind == INSTALLED) {
+            err = uninstall_package(row.id, s_wipe);
+        } else {
+            remove_dir(std::string(USERAPPS_DIR) + "/" + row.folder);      // a package that does not load
+            ESP_LOGI(TAG, "deleted the folder %s", row.folder.c_str());
+        }
         s_status = err.empty() ? std::string(phone_tr("Đã gỡ ", "Removed ")) + row.id : std::string(phone_tr("Không gỡ được: ", "Cannot remove: ")) + err;
     } else {
         std::string err = install_from_bpk(row.folder);

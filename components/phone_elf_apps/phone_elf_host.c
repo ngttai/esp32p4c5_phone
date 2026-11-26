@@ -52,7 +52,7 @@ struct phone_elf_inst {
     char id[40];
     char data_dir[96];
     char pkg_dir[128];                      /* where the ELF was read from */
-    char pref_prefix[8];                    /* "e" + 3 hex digits of the app id + "_" */
+    char pref_ns[16];                       /* NVS namespace of the app: "e" + 8 hex digits of the hash of its id */
     phone_elf_host_close_cb_t close_cb;
     void *close_user;
     elf_timer_t timers[MAX_TIMERS];
@@ -239,16 +239,21 @@ static int api_make_dirs(phone_elf_ctx_t *ctx, const char *path)
     return phone_sd_make_dirs(path) == 0 ? 0 : PHONE_ELF_E_IO;
 }
 
+static void pref_namespace(const char *app_id, char *out, size_t n)
+{
+    uint32_t h = 2166136261u;
+    for (const char *c = app_id; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
+    snprintf(out, n, "e%08x", (unsigned)h);
+}
+
 static int32_t api_pref_get(phone_elf_ctx_t *ctx, const char *key, int32_t def)
 {
     phone_elf_inst_t *in = G(0);
-    if (!in || !key) return def;
-    char k[24];
-    snprintf(k, sizeof(k), "%s%.9s", in->pref_prefix, key);
+    if (!in || !key || strlen(key) > 15) return def;
     nvs_handle_t h;
     int32_t v = def;
-    if (nvs_open("elfapps", NVS_READONLY, &h) == ESP_OK) {
-        if (nvs_get_i32(h, k, &v) != ESP_OK) v = def;
+    if (nvs_open(in->pref_ns, NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_i32(h, key, &v) != ESP_OK) v = def;
         nvs_close(h);
     }
     return v;
@@ -256,15 +261,26 @@ static int32_t api_pref_get(phone_elf_ctx_t *ctx, const char *key, int32_t def)
 static int api_pref_set(phone_elf_ctx_t *ctx, const char *key, int32_t value)
 {
     phone_elf_inst_t *in = G(0);
-    if (!in || !key) return PHONE_ELF_E_ARG;
-    char k[24];
-    snprintf(k, sizeof(k), "%s%.9s", in->pref_prefix, key);
+    if (!in || !key || !key[0] || strlen(key) > 15) return PHONE_ELF_E_ARG;
     nvs_handle_t h;
-    if (nvs_open("elfapps", NVS_READWRITE, &h) != ESP_OK) return PHONE_ELF_E_IO;
-    esp_err_t e = nvs_set_i32(h, k, value);
+    if (nvs_open(in->pref_ns, NVS_READWRITE, &h) != ESP_OK) return PHONE_ELF_E_IO;
+    esp_err_t e = nvs_set_i32(h, key, value);
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
     return e == ESP_OK ? 0 : PHONE_ELF_E_IO;
+}
+
+void phone_elf_host_erase_data(const char *app_id)
+{
+    char ns[16];
+    pref_namespace(app_id, ns, sizeof(ns));
+    nvs_handle_t h;
+    if (nvs_open(ns, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_all(h);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "[%s] settings erased (namespace %s)", app_id, ns);
+    }
 }
 
 static int api_beep(phone_elf_ctx_t *ctx) { if (!G(PHONE_ELF_PERM_AUDIO)) return PHONE_ELF_E_PERM; phone_audio_beep(); return 0; }
@@ -421,9 +437,7 @@ phone_elf_inst_t *phone_elf_host_open(const char *app_id, const char *elf_path, 
     snprintf(in->pkg_dir, sizeof(in->pkg_dir), "%s", elf_path);
     char *slash = strrchr(in->pkg_dir, '/');
     if (slash) *slash = 0;
-    uint32_t h = 2166136261u;
-    for (const char *c = app_id; *c; c++) h = (h ^ (uint8_t)*c) * 16777619u;
-    snprintf(in->pref_prefix, sizeof(in->pref_prefix), "e%03x_", (unsigned)(h & 0xFFF));
+    pref_namespace(app_id, in->pref_ns, sizeof(in->pref_ns));
 
     esp_elf_init(&in->elf);
     int64_t t0 = esp_timer_get_time();

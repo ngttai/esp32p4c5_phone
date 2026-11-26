@@ -121,7 +121,8 @@ typedef struct {
     const char *(*app_dir)(phone_elf_ctx_t *ctx);
     int (*make_dirs)(phone_elf_ctx_t *ctx, const char *file_path);          /* create the folders above a file inside app_dir(); PERM_FILES */
 
-    /* settings of the app: 32-bit values, key up to 9 characters, kept apart from the system and from other apps */
+    /* settings of the app: 32-bit values, key up to 15 characters; every app has its own NVS namespace, apart from the system and the other apps
+   (erased when the app is removed with its data) */
     int32_t (*pref_get)(phone_elf_ctx_t *ctx, const char *key, int32_t def);
     int (*pref_set)(phone_elf_ctx_t *ctx, const char *key, int32_t value);
 

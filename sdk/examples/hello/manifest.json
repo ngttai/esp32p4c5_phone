@@ -1,0 +1,14 @@
+{
+  "package": {
+    "id": "hello_sdk",
+    "name": { "en": "Hello", "vi": "Xin chào" },
+    "version": "0.1.0",
+    "icon": "icon.png"
+  },
+  "runtime": {
+    "type": "ELF",
+    "entry": "hello.elf",
+    "api": 3
+  },
+  "permissions": []
+}

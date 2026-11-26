@@ -110,6 +110,10 @@ static void run_tests(void)
     check("math, 64-bit", fabs(q - 2.0) < 0.001 && div == 142857142857LL && fabsf(sinf(1.5707963f) - 1.0f) < 0.001f, info);
 
     /* settings: a 32-bit value, kept per app */
+    ok = A->pref_set(C, "fifteen_chars_k", 7) == 0 && A->pref_get(C, "fifteen_chars_k", 0) == 7 &&
+         A->pref_set(C, "sixteen_chars_key", 1) == PHONE_ELF_E_ARG;
+    check("pref key length", ok, "15 characters work, 17 are refused");
+
     ok = A->pref_set(C, "t1", 123456789) == 0 && A->pref_get(C, "t1", -1) == 123456789 && A->pref_get(C, "nokey", 77) == 77;
     check("pref 32-bit", ok, "");
 
