@@ -26,6 +26,7 @@
 #define ESP_UTILS_LOG_TAG "SETT"
 #include "esp_lib_utils.h"
 #include "phone_fonts.h"
+#include "phone_keyboard.h"
 #include "phone_net.h"
 #include "phone_power.h"
 #include "phone_locale.h"
@@ -283,6 +284,7 @@ void show_page(int page)
     }
     if (s_kb) {
         if (page == PAGE_PASS) {
+            phone_keyboard_reset(s_kb);
             lv_obj_remove_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
@@ -1971,10 +1973,9 @@ void build_ui()
     lv_textarea_set_one_line(s_pass_ta, true);
     lv_textarea_set_password_mode(s_pass_ta, true);
     lv_textarea_set_placeholder_text(s_pass_ta, T("Nhập mật khẩu", "Enter password"));
-    lv_obj_t *kb = lv_keyboard_create(root);
-    lv_obj_set_size(kb, LV_PCT(100), 280);
+    lv_obj_t *kb = phone_keyboard_create(root, s_pass_ta);
+    lv_obj_set_size(kb, LV_PCT(100), 300);
     lv_obj_align(kb, LV_ALIGN_BOTTOM_MID, 0, -NAV_STRIP_H);    /* above the touch guard */
-    lv_keyboard_set_textarea(kb, s_pass_ta);
     lv_obj_add_event_cb(kb, on_pass_ready, LV_EVENT_READY, nullptr);
     lv_obj_add_event_cb(kb, on_kb_cancel, LV_EVENT_CANCEL, nullptr);
     lv_obj_add_event_cb(s_pass_ta, on_pass_click, LV_EVENT_CLICKED, nullptr);
