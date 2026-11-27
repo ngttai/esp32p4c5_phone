@@ -36,6 +36,7 @@ Source layout, configuration and implementation notes.
 - `components/brookesia_app_calculator/`, `components/brookesia_app_game_2048/`: Calculator and 2048 from ESP-Brookesia, ported from its speaker system to the phone system. 2048 ignores swipes that start on a screen edge or on the lock screen.
 - `components/brookesia_core/`: ESP-Brookesia core (phone system, GUI, stylesheets).
 - `components/brookesia_app_squareline_demo/`: Squareline demo app.
+- `components/phone_elf_apps/`: ELF apps from the card (API header, host, symbol list, ElfApp, the Apps app, `.bpk` reader); `sdk/`: the SDK for those apps; `tools/app_test/`: the app that tests every call; [`docs/elf_apps/`](elf_apps/README.md): the documentation.
 - `components/phone_common_net/`: boot-time Wi-Fi for the RainMaker workflow; a no-op here (`CONFIG_RAINMAKER_APP_SUPPORT=n`).
 - Board support package: `esp32p4c5_bsp` from GitHub, tag `v0.2.1`, pulled in by `main/idf_component.yml` (git source, `bsp/esp32p4c5_bsp`). To change the BSP alongside the phone, swap the git source for `override_path` to a local clone (the comment in that file shows it).
 
