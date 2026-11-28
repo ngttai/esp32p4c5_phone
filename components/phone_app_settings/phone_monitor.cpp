@@ -12,6 +12,8 @@
 #include "phone_fonts.h"
 #include "phone_locale.h"
 
+
+LV_FONT_DECLARE(phone_font_mono_14);    // Code New Roman Nerd Font Mono 14 px, ASCII (fonts/OFL-CodeNewRoman.txt)
 namespace {
 
 const char *TAG = "SYSMON";
@@ -121,12 +123,24 @@ void update(lv_timer_t *)
     const size_t psram_total = heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024;
     const size_t psram_big = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024;
 
+    /* uptime: hh:mm:ss, with the days in front after a day */
+    char up[24];
+    const uint32_t up_s = static_cast<uint32_t>(esp_timer_get_time() / 1000000);
+    const unsigned d = up_s / 86400, h = up_s / 3600 % 24, m = up_s / 60 % 60, sec = up_s % 60;
+    if (d > 0) {
+        snprintf(up, sizeof(up), "%ud %02u:%02u:%02u", d, h, m, sec);
+    } else {
+        snprintf(up, sizeof(up), "%02u:%02u:%02u", h, m, sec);
+    }
+
     lv_label_set_text_fmt(s_text,
-                          "CPU   %d%% %d%%  FPS %u\n"
-                          "SRAM  %u/%uK min %uK max %uK\n"
-                          "DMA   %uK max %uK\n"
-                          "PSRAM %u.%u/%u.%uM max %u.%uM",
-                          load[0], configNUMBER_OF_CORES > 1 ? load[1] : 0, static_cast<unsigned>(fps),
+                          /* fixed width numbers (monospaced font): the labels of a row stay in place */
+                          "UP %s\n"
+                          "CPU %3d%% %3d%% FPS %2u\n"
+                          "SRAM %3uK/%3uK min %3uK max %3uK\n"
+                          "DMA %3uK max %3uK\n"
+                          "PSRAM %2u.%uM/%2u.%uM max %2u.%uM",
+                          up, load[0], configNUMBER_OF_CORES > 1 ? load[1] : 0, static_cast<unsigned>(fps),
                           static_cast<unsigned>(sram), static_cast<unsigned>(sram_total), static_cast<unsigned>(sram_min),
                           static_cast<unsigned>(sram_big),
                           static_cast<unsigned>(dma), static_cast<unsigned>(dma_big),
@@ -163,7 +177,7 @@ void show()
     lv_obj_remove_flag(s_box, static_cast<lv_obj_flag_t>(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
     lv_obj_align(s_box, LV_ALIGN_TOP_RIGHT, -6, 40);
     s_text = lv_label_create(s_box);
-    lv_obj_set_style_text_font(s_text, phone_font_by_size(14), 0);
+    lv_obj_set_style_text_font(s_text, &phone_font_mono_14, 0);
     lv_obj_set_style_text_color(s_text, lv_color_hex(0x7CFC9A), 0);
     lv_label_set_text(s_text, "...");
 

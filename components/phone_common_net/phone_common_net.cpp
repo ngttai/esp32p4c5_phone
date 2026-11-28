@@ -108,7 +108,7 @@ static void wifi_auto_connect_on_boot(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "Auto Wi-Fi connecting to SSID: %s", CONFIG_PHONE_AUTO_WIFI_SSID);
+    ESP_LOGI(TAG, "Auto Wi-Fi connecting (SSID from Kconfig)");
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "Connected to Wi-Fi");
@@ -117,7 +117,7 @@ static void wifi_auto_connect_on_boot(void)
     } else {
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
-    ESP_LOGI(TAG, "Auto Wi-Fi connected to SSID: %s", CONFIG_PHONE_AUTO_WIFI_SSID);
+    ESP_LOGI(TAG, "Auto Wi-Fi done (SSID from Kconfig)");
 
     if (bits & WIFI_CONNECTED_BIT) {
         esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_PHONE_SNTP_SERVER);

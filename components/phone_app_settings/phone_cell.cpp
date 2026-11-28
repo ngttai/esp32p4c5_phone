@@ -1,4 +1,5 @@
 #include "phone_cell.h"
+#include "phone_redact.h"
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -86,8 +87,10 @@ void log_change()
     s_logged_bars = i.bars;
     s_logged_data = i.data;
     if (i.state == PHONE_CELL_REGISTERED) {
+        char ip[24], data_ip[24];
         ESP_LOGI(TAG, "registered %s%s %s, %d dBm, %d/4, APN %s, IP %s; data %d %s %s", i.oper, i.roaming ? " (roaming)" : "",
-                 i.act, i.rssi_dbm, i.bars, i.apn, i.ip, static_cast<int>(i.data), i.data_ip, i.link);
+                 i.act, i.rssi_dbm, i.bars, i.apn, phone_redact_ip(i.ip, ip, sizeof(ip)), static_cast<int>(i.data),
+                 phone_redact_ip(i.data_ip, data_ip, sizeof(data_ip)), i.link);
     } else {
         ESP_LOGI(TAG, "state %d, data %d", static_cast<int>(i.state), static_cast<int>(i.data));
     }
@@ -435,7 +438,8 @@ void read_identity()
     memcpy(s_info.firmware, id.firmware, sizeof(id.firmware));
     memcpy(s_info.imei, id.imei, sizeof(id.imei));
     xSemaphoreGive(s_lock);
-    ESP_LOGI(TAG, "%s %s, IMEI %s", id.model, id.firmware, id.imei);
+    char imei[16];
+    ESP_LOGI(TAG, "%s %s, IMEI %s", id.model, id.firmware, phone_redact_tail(id.imei, 4, imei, sizeof(imei)));
 }
 
 /* SIM: true when ready; reads ICCID and IMSI once */

@@ -1,4 +1,5 @@
 #include "phone_net.h"
+#include "phone_redact.h"
 #include "phone_cell.h"
 #include "phone_locale.h"
 #include <atomic>
@@ -167,7 +168,8 @@ void start_attempt(int idx)
     s_pend_pass[0] = '\0';
     wifi_config_t cfg = {};
     if (build_cfg(idx, &cfg)) {
-        ESP_LOGI(TAG, "Wifi try %d: %s", idx, reinterpret_cast<const char *>(cfg.sta.ssid));
+        char ssid[24];
+        ESP_LOGI(TAG, "Wifi try %d: %s", idx, phone_redact_ssid(reinterpret_cast<const char *>(cfg.sta.ssid), ssid, sizeof(ssid)));
         esp_wifi_set_config(WIFI_IF_STA, &cfg);
         esp_wifi_connect();
     }

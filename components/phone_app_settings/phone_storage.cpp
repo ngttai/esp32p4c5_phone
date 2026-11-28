@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "bsp/esp-bsp.h"
+#include "phone_sdlog.h"
 
 #define TAG "SD"
 
@@ -125,9 +126,11 @@ extern "C" esp_err_t phone_storage_lend(sdmmc_card_t **card)
     if (s_state != PHONE_STORAGE_MOUNTED || phone_storage_holders(nullptr, 0) > 0) {
         return ESP_ERR_INVALID_STATE;
     }
+    phone_sdlog_storage_pause();
     esp_err_t err = bsp_sdcard_unmount();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "unmount: %s", esp_err_to_name(err));
+        phone_sdlog_storage_resume();
         return err;
     }
     s_state = PHONE_STORAGE_USB;
@@ -150,6 +153,7 @@ extern "C" esp_err_t phone_storage_recover(void)
     }
     ESP_LOGW(TAG, "card stuck: power cycle and remount");
     s_state = PHONE_STORAGE_CHECKING;
+    phone_sdlog_storage_pause();
     /* unmount releases slot 0 only (slot 1 is the SDIO link of the C5) and the LDO of the card */
     esp_err_t err = bsp_sdcard_unmount();
     if (err == ESP_OK) {
@@ -157,6 +161,7 @@ extern "C" esp_err_t phone_storage_recover(void)
         err = mount_card();
     }
     s_state = err == ESP_OK ? PHONE_STORAGE_MOUNTED : PHONE_STORAGE_NO_CARD;
+    phone_sdlog_storage_resume();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "recover: %s", esp_err_to_name(err));
     }
@@ -172,6 +177,7 @@ extern "C" esp_err_t phone_storage_take_back(void)
     /* The BSP never formats the card when mounting fails */
     esp_err_t err = mount_card();
     s_state = err == ESP_OK ? PHONE_STORAGE_MOUNTED : PHONE_STORAGE_NO_CARD;
+    phone_sdlog_storage_resume();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "remount: %s", esp_err_to_name(err));
     }

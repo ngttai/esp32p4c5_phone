@@ -33,6 +33,7 @@
 #include "phone_audio.h"
 #include "phone_storage.h"
 #include "phone_monitor.h"
+#include "phone_sdlog.h"
 #include "phone_speedtest.h"
 #include "phone_membench.h"
 #include "phone_sdbench.h"
@@ -1982,6 +1983,10 @@ void build_ui()
         phone_monitor_set(lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED));
     });
     add_tile(lv_obj_get_parent(mon), kIconChart, 0x27AE60);
+    lv_obj_t *sdlog = switch_row(g, T("Ghi log vào thẻ nhớ", "Log to memory card"), phone_sdlog_is_on(), [](lv_event_t *e) {
+        phone_sdlog_set(lv_obj_has_state(static_cast<lv_obj_t *>(lv_event_get_target(e)), LV_STATE_CHECKED));
+    });
+    add_tile(lv_obj_get_parent(sdlog), LV_SYMBOL_SD_CARD, 0x6B7785);
     group_row(g, LV_SYMBOL_DOWNLOAD, 0x2F80ED, T("Tốc độ mạng", "Network speed"), nullptr, PAGE_SPEED);
     group_row(g, LV_SYMBOL_CHARGE, 0xF2C94C, T("Tốc độ bộ nhớ", "Memory speed"), nullptr, PAGE_MEM);
     group_row(g, "4G", 0x27AE60, T("Kiểm tra module 4G", "4G module test"), nullptr, PAGE_CELL);

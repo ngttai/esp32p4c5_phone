@@ -16,6 +16,7 @@
 #include "phone_lock.h"
 #include "phone_volume.h"
 #include "phone_monitor.h"
+#include "phone_sdlog.h"
 #include "phone_quick.h"
 #include "phone_cell.h"
 #include "phone_boot_splash.h"
@@ -54,6 +55,8 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(err);
     phone_locale_init();
+    /* Settings > Debug: copy of the log on the memory card, from here on (kept in PSRAM until the card is mounted) */
+    phone_sdlog_init();
     phone_audio_set_volume(phone_pref_get("mute", 0) ? 0 : phone_pref_get("vol", 60));
 
     phone_common_net_boot();
