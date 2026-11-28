@@ -16,6 +16,7 @@
 #include "phone_fonts.h"
 #include "phone_locale.h"
 #include "phone_cell.h"
+#include "esp_pm.h"
 #include "phone_net.h"
 #include "phone_power.h"
 
@@ -48,6 +49,7 @@ constexpr int DIM_PERCENT = 2;                 // below the 5 % minimum of the b
 constexpr uint32_t LOCK_IDLE_MS = 10000;       // lock screen left alone -> screen off
 constexpr uint32_t DIM_LEAD_MAX_MS = 10000;    // dim this long before the screen goes off
 constexpr uint32_t IDLE_TICK_MS = 200;
+constexpr int SCREEN_OFF_CPU_MHZ = 200;        // CPU maximum while the screen is off (see cpu_slow)
 constexpr uint32_t FIRST_FRAME_MS = 60;        // let LVGL draw the lock screen before the backlight comes on
 
 constexpr int TIMEOUTS_S[] = {15, 30, 60, 120, 300, 0};
@@ -908,6 +910,36 @@ void unlock()
 
 /* ---------------- state changes ---------------- */
 
+/* Worker task. The DSI DPI driver holds a CPU_FREQ_MAX lock for good, so the CPU only runs slower when the maximum
+ * itself is lowered. 200 MHz while the screen is off: lower ones (100, 40 MHz) slow the buses that feed the DPI stream
+ * from PSRAM ("underrun" ~30 times a second, logged from the interrupt). */
+void cpu_slow(bool slow)
+{
+    static esp_pm_config_t s_normal;
+    static bool s_saved, s_slow;
+    if (slow == s_slow) {
+        return;
+    }
+    if (!s_saved) {
+        s_saved = esp_pm_get_configuration(&s_normal) == ESP_OK;
+    }
+    if (!s_saved) {
+        return;
+    }
+    esp_pm_config_t cfg = s_normal;
+    if (slow) {
+        cfg.max_freq_mhz = SCREEN_OFF_CPU_MHZ;
+        if (cfg.min_freq_mhz > cfg.max_freq_mhz) {
+            cfg.min_freq_mhz = cfg.max_freq_mhz;
+        }
+    }
+    if (esp_pm_configure(&cfg) == ESP_OK) {
+        s_slow = slow;
+    } else {
+        ESP_LOGW(TAG, "CPU %d MHz refused", cfg.max_freq_mhz);
+    }
+}
+
 /* Worker task */
 void go_off()
 {
@@ -925,16 +957,18 @@ void go_off()
     }
     /* Nothing to draw with the backlight off: stop LVGL and its tick */
     s_paused = esp_lv_adapter_pause(1000) == ESP_OK;
-    /* Panel asleep and the frame buffer no longer streamed from PSRAM; nothing is flushed while paused */
+    /* Panel asleep (the DPI stream from PSRAM keeps running); nothing is flushed while paused */
     if (s_paused && bsp_display_sleep(true) != ESP_OK) {
         ESP_LOGW(TAG, "panel sleep failed");
     }
+    cpu_slow(true);
     ESP_LOGI(TAG, "Screen off");
 }
 
 /* Worker task: screen back on, showing the lock screen */
 void wake_to_lock()
 {
+    cpu_slow(false);
     bsp_display_sleep(false);   // ~130 ms; no-op when the panel was not put to sleep
     if (s_paused) {
         esp_lv_adapter_resume();

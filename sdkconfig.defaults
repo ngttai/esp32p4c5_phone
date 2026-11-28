@@ -147,3 +147,6 @@ CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
 CONFIG_BSP_DISPLAY_LVGL_TASK_STACK_SIZE=12288
 # SRAM: the Assistant audio task stack (8 KB) only while it runs, not a static buffer kept for ever
 CONFIG_XIAOZHI_AUDIO_TASK_ALLOC_DYNAMIC=y
+# Power management: phone_lock lowers the CPU to 200 MHz while the screen is off (the DSI DPI lock keeps it at the
+# maximum otherwise; 100 and 40 MHz starve the DPI stream: "underrun")
+CONFIG_PM_ENABLE=y
