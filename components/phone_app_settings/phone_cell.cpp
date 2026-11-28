@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_event.h"
 #include "esp_timer.h"
@@ -38,6 +39,13 @@ constexpr int BAUD_BOOT = 115200;
 constexpr int BAUD_FAST = 921600;               // stage 0: 300/300 "AT" through the level shifter
 
 TaskHandle_t s_task;
+std::atomic<bool> s_screen_off{false};
+bool s_asleep;                                  // phone_cell task only: DTR lets the module sleep
+/* sleep reports of the module (URC, esp_modem task: no logging there, its stack is small) */
+std::atomic<uint32_t> s_sleeps{0};
+std::atomic<int64_t> s_sleep_since{0};          // 0 while awake
+std::atomic<int64_t> s_slept_us{0};
+std::atomic<int64_t> s_first_sleep_us{0};
 std::atomic<bool> s_want;
 std::atomic<bool> s_want_data;
 std::atomic<bool> s_powered;
@@ -234,7 +242,8 @@ void on_ip_event(void *, esp_event_base_t, int32_t id, void *data)
         auto *ev = static_cast<ip_event_got_ip_t *>(data);
         char ip[40];
         snprintf(ip, sizeof(ip), IPSTR, IP2STR(&ev->ip_info.ip));
-        ESP_LOGI(TAG, "PPP up: %s", ip);
+        char masked[24];
+        ESP_LOGI(TAG, "PPP up: %s", phone_redact_ip(ip, masked, sizeof(masked)));
         set_data(PHONE_CELL_DATA_UP, ip);
         s_ppp_up = true;
     } else if (id == IP_EVENT_PPP_LOST_IP) {
@@ -272,6 +281,80 @@ bool sync_at(int baud, int tries)
 }
 
 /* Power the module and open the esp_modem link in command mode; false when it never answers */
+/* DTR (GPIO51) drives an NPN (Q5) to the module DTR: high here = DTR low = awake, low = DTR pulled up = the
+ * module may sleep (AT+MLPMCFG="sleepmode",2) when it has nothing to do. Asleep it does not answer AT. */
+void dtr_awake(bool awake)
+{
+    static bool configured;
+    if (!configured) {
+        const gpio_config_t cfg = {
+            .pin_bit_mask = BIT64(BSP_MODEM_DTR),
+            .mode = GPIO_MODE_OUTPUT,
+        };
+        gpio_config(&cfg);
+        configured = true;
+    }
+    gpio_set_level(BSP_MODEM_DTR, awake ? 1 : 0);
+}
+
+/* +MLPMENTER: 2 / +MLPMEXIT: 2 (AT+MLPMCFG="sleepind",2): counted here, logged by the phone_cell task */
+esp_err_t on_urc(uint8_t *data, size_t len)
+{
+    const char *p = reinterpret_cast<const char *>(data);
+    bool seen = false;
+    for (const char *q = p; (q = static_cast<const char *>(memchr(q, '+', p + len - q))) != nullptr; q++) {
+        const size_t left = p + len - q;
+        const int64_t now = esp_timer_get_time();
+        if (left >= 10 && memcmp(q, "+MLPMENTER", 10) == 0) {
+            s_sleeps++;
+            s_sleep_since = now;
+            if (s_first_sleep_us == 0) {
+                s_first_sleep_us = now;
+            }
+            seen = true;
+        } else if (left >= 9 && memcmp(q, "+MLPMEXIT", 9) == 0) {
+            const int64_t since = s_sleep_since.exchange(0);
+            if (since) {
+                s_slept_us += now - since;
+            }
+            seen = true;
+        }
+    }
+    /* ESP_OK: this buffer held a sleep report, drop it; ESP_ERR_TIMEOUT: not ours, leave it to the command */
+    return seen ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
+/* Screen off, Wi-Fi carrying the traffic (no PPP): let the module sleep and stop polling it */
+void modem_sleep(bool sleep)
+{
+    if (sleep == s_asleep || !s_dce) {
+        return;
+    }
+    static int64_t allowed_at;
+    dtr_awake(!sleep);
+    s_asleep = sleep;
+    if (sleep) {
+        allowed_at = esp_timer_get_time();
+        s_sleeps = 0;
+        s_slept_us = 0;
+        s_first_sleep_us = 0;
+        s_sleep_since = 0;
+        ESP_LOGI(TAG, "modem may sleep (screen off)");
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (!sync_at(s_baud, 5)) {
+        ESP_LOGW(TAG, "no answer after wake");
+    }
+    const int64_t now = esp_timer_get_time();
+    const int64_t since = s_sleep_since.exchange(0);
+    int64_t slept = s_slept_us + (since ? now - since : 0);
+    const int64_t first = s_first_sleep_us;
+    ESP_LOGI(TAG, "modem awake: asleep %lld of %lld s, %u times, first after %lld s", slept / 1000000,
+             (now - allowed_at) / 1000000, static_cast<unsigned>(s_sleeps.load()),
+             first ? (first - allowed_at) / 1000000 : -1LL);
+}
+
 bool power_on()
 {
     if (!s_ppp) {
@@ -305,7 +388,10 @@ bool power_on()
         return false;
     }
     esp_modem_set_error_cb(s_dce, on_terminal_error);
+    esp_modem_set_urc(s_dce, on_urc);
     s_mode = ESP_MODEM_MODE_COMMAND;
+    dtr_awake(true);
+    s_asleep = false;
     bsp_power_set(BSP_POWER_MODEM, true);
     /* the module answers ~5 s after power-on, at 115200 or at a rate kept from before */
     const int64_t end = esp_timer_get_time() + static_cast<int64_t>(BOOT_MS) * 1000;
@@ -331,6 +417,15 @@ bool power_on()
         }
     }
     ESP_LOGI(TAG, "modem link at %d baud", s_baud);
+    /* sleep allowed, held off by DTR while the screen is on (not saved: the default comes back at power-on) */
+    char resp[64];
+    if (!at("AT+MLPMCFG=\"sleepmode\",2,0", resp, sizeof(resp))) {
+        ESP_LOGW(TAG, "sleep mode not set");
+    }
+    /* reports of deep sleep in and out, counted by on_urc */
+    if (!at("AT+MLPMCFG=\"sleepind\",2", resp, sizeof(resp))) {
+        ESP_LOGW(TAG, "sleep reports not set");
+    }
     return true;
 }
 
@@ -363,6 +458,8 @@ void power_off()
         esp_modem_destroy(s_dce);
         s_dce = nullptr;
     }
+    s_asleep = false;
+    dtr_awake(false);   // no current through Q5 while the module is off
     if (s_powered) {
         bsp_power_set(BSP_POWER_MODEM, false);
         s_powered = false;
@@ -725,6 +822,14 @@ void cell_task(void *)
         /* mobile data: down when turned off, lost, or Wi-Fi is back; up when on, registered and Wi-Fi is gone */
         uint32_t route_wait = POLL_MS;
         const bool need = s_want_data && need_ppp(&route_wait);
+        const bool may_sleep = s_screen_off && s_mode == ESP_MODEM_MODE_COMMAND && !need;
+        modem_sleep(may_sleep);
+        if (may_sleep) {
+            /* no AT while it sleeps: woken by the screen, or when mobile data has to take over */
+            log_change();
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(route_wait));
+            continue;
+        }
         if (s_mode != ESP_MODEM_MODE_COMMAND && (!s_want_data || s_ppp_lost || !need)) {
             const bool lost = s_ppp_lost;
             data_down();
@@ -788,6 +893,14 @@ extern "C" void phone_cell_set_enabled(bool on)
 {
     phone_pref_set("cell", on ? 1 : 0);
     s_want = on;
+    if (s_task) {
+        xTaskNotifyGive(s_task);
+    }
+}
+
+extern "C" void phone_cell_set_screen(bool on)
+{
+    s_screen_off = !on;
     if (s_task) {
         xTaskNotifyGive(s_task);
     }

@@ -7,7 +7,7 @@ dependencies:
   esp32p4c5_bsp:
     git: https://github.com/ngttai/esp32p4c5_bsp.git
     path: bsp/esp32p4c5_bsp
-    version: v0.4.0
+    version: v0.5.0
 
   # USB stack at the versions tested on the board (Files USB drive, second screen, USB camera)
   espressif/tinyusb: "==0.21.0~2"

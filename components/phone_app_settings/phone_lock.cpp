@@ -917,6 +917,7 @@ void go_off()
     bsp_display_brightness_set(0);
     s_state = ST_OFF;
     wifi_power_save(true);
+    phone_cell_set_screen(false);
     /* nothing runs for the dark screen: the effect is removed (the clock tick starts it again on wake) */
     if (bsp_display_lock(1000)) {
         fx_stop();
@@ -924,17 +925,23 @@ void go_off()
     }
     /* Nothing to draw with the backlight off: stop LVGL and its tick */
     s_paused = esp_lv_adapter_pause(1000) == ESP_OK;
+    /* Panel asleep and the frame buffer no longer streamed from PSRAM; nothing is flushed while paused */
+    if (s_paused && bsp_display_sleep(true) != ESP_OK) {
+        ESP_LOGW(TAG, "panel sleep failed");
+    }
     ESP_LOGI(TAG, "Screen off");
 }
 
 /* Worker task: screen back on, showing the lock screen */
 void wake_to_lock()
 {
+    bsp_display_sleep(false);   // ~130 ms; no-op when the panel was not put to sleep
     if (s_paused) {
         esp_lv_adapter_resume();
         s_paused = false;
     }
     wifi_power_save(false);
+    phone_cell_set_screen(true);
     if (bsp_display_lock(1000)) {
         lock_show(true);
         bsp_display_unlock();

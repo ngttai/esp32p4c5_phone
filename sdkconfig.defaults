@@ -138,6 +138,8 @@ CONFIG_LWIP_PPP_SUPPORT=y
 # CONFIG_LWIP_PPP_ENABLE_IPV6 is not set
 # 4G: AT+CGCONTRDP of an IPV4V6 context is two long lines (IPv6 address, mask, DNS)
 CONFIG_ESP_MODEM_C_API_STR_MAX=1024
+# 4G: the sleep reports of the module (+MLPMENTER / +MLPMEXIT), phone_cell.cpp
+CONFIG_ESP_MODEM_URC_HANDLER=y
 # 4G: DNS follows the default netif (else the carrier DNS stays after PPP and fails over Wi-Fi)
 CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
 

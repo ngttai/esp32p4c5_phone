@@ -74,6 +74,8 @@ bool phone_cell_busy(void);
 void phone_cell_get(phone_cell_info_t *out);
 /** The Mobile network page is shown: the serving cell (band, EARFCN, PCI, RSRQ, SINR) is read with each poll */
 void phone_cell_set_detail(bool on);
+/** Screen on/off (phone_lock): with the screen off and no PPP running, the module may sleep and is not polled. */
+void phone_cell_set_screen(bool on);
 /** Wi-Fi went up or down (from phone_net): the route choice is checked at once */
 void phone_cell_wifi_changed(void);
 /** Bytes through PPP (4G only, PPP framing included), kept in NVS across restarts; `since` = time of the last
