@@ -18,6 +18,8 @@ protected:
     bool run() override;
     bool back() override;
     bool resume() override;
+    bool pause() override;
+    bool close() override;
 
 private:
     PhoneSettings();

@@ -54,6 +54,12 @@ typedef struct {
     phone_cell_data_t data;
     char data_ip[40];           /**< address of the PPP interface */
     char link[24];              /**< "CMUX 921600", "PPP 115200"... */
+    /* serving cell, read only while phone_cell_set_detail(true) (and not in plain data mode) */
+    int band;                   /**< LTE band (3 = 1800 MHz), 0 unknown */
+    int earfcn;                 /**< -1 unknown */
+    int pci;                    /**< -1 unknown */
+    int rsrq_x10;               /**< RSRQ in tenths of dB (-75 = -7.5 dB) */
+    int sinr_x10;               /**< SINR in tenths of dB */
 } phone_cell_info_t;
 
 /** At boot: turns 4G on if it was on */
@@ -66,6 +72,8 @@ const char *phone_cell_data_text(phone_cell_data_t data);
 /** The modem is powered or being powered (the probe must not run) */
 bool phone_cell_busy(void);
 void phone_cell_get(phone_cell_info_t *out);
+/** The Mobile network page is shown: the serving cell (band, EARFCN, PCI, RSRQ, SINR) is read with each poll */
+void phone_cell_set_detail(bool on);
 /** Wi-Fi went up or down (from phone_net): the route choice is checked at once */
 void phone_cell_wifi_changed(void);
 /** Bytes through PPP (4G only, PPP framing included), kept in NVS across restarts; `since` = time of the last

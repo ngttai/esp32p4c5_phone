@@ -271,6 +271,8 @@ void on_pass_click(lv_event_t *e)
     lv_obj_remove_flag(s_kb, LV_OBJ_FLAG_HIDDEN);
 }
 
+void secrets_hide();
+
 void show_page(int page)
 {
     for (int i = 0; i < PAGE_COUNT; i++) {
@@ -291,6 +293,8 @@ void show_page(int page)
         }
     }
     s_cur_page = page;
+    secrets_hide();
+    phone_cell_set_detail(page == PAGE_CELLULAR);
 }
 
 lv_obj_t *make_page(lv_obj_t *root, const char *title, int page)
@@ -521,6 +525,66 @@ lv_obj_t *kv_row(lv_obj_t *card, const char *key)
     lv_obj_t *v = lv_label_create(row);
     lv_obj_set_style_text_color(v, lv_color_hex(COLOR_SUB), 0);
     return v;
+}
+
+/* IMEI, ICCID, IMSI and MAC: only the last 4 characters shown ("•••• 5842"), a tap on the row shows the whole
+ * value until the page is left. The bullet comes from the Montserrat fallback (LV_SYMBOL_BULLET). */
+enum Secret { SEC_IMEI, SEC_ICCID, SEC_IMSI, SEC_MAC, SEC_COUNT };
+struct SecretRow {
+    lv_obj_t *label;
+    char value[48];
+    bool shown;
+};
+SecretRow s_secrets[SEC_COUNT];
+
+void secret_render(SecretRow &r)
+{
+    if (!r.label) {
+        return;
+    }
+    const size_t n = strlen(r.value);
+    char buf[64];
+    if (r.shown || n <= 4) {
+        strlcpy(buf, n ? r.value : "--", sizeof(buf));
+    } else {
+        snprintf(buf, sizeof(buf), LV_SYMBOL_BULLET LV_SYMBOL_BULLET LV_SYMBOL_BULLET LV_SYMBOL_BULLET " %s",
+                 r.value + n - 4);
+    }
+    if (strcmp(lv_label_get_text(r.label), buf) != 0) {
+        lv_label_set_text(r.label, buf);
+    }
+}
+
+void secret_set(Secret id, const char *value)
+{
+    SecretRow &r = s_secrets[id];
+    if (strcmp(r.value, value) != 0) {
+        strlcpy(r.value, value, sizeof(r.value));
+    }
+    secret_render(r);
+}
+
+/* hidden again (on leaving a page) */
+void secrets_hide()
+{
+    for (auto &r : s_secrets) {
+        r.shown = false;
+        secret_render(r);
+    }
+}
+
+void secret_attach(Secret id, lv_obj_t *label)
+{
+    s_secrets[id] = {};
+    s_secrets[id].label = label;
+    lv_obj_t *row = lv_obj_get_parent(label);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(row, [](lv_event_t *e) {
+        SecretRow &r = s_secrets[reinterpret_cast<intptr_t>(lv_event_get_user_data(e))];
+        r.shown = !r.shown;
+        secret_render(r);
+    }, LV_EVENT_CLICKED, reinterpret_cast<void *>(static_cast<intptr_t>(id)));
+    secret_render(s_secrets[id]);
 }
 
 lv_obj_t *switch_row(lv_obj_t *card, const char *text, bool on, lv_event_cb_t cb)
@@ -1076,7 +1140,7 @@ void refresh_about()
     }
     lv_label_set_text(s_about_vals[3], buf);
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    lv_label_set_text(s_about_vals[4], buf);
+    secret_set(SEC_MAC, buf);
     if (!phone_net_c5_version(buf, sizeof(buf))) {
         strlcpy(buf, "--", sizeof(buf));
     }
@@ -1266,7 +1330,8 @@ void build_speed_page(lv_obj_t *root)
 
 /* Mobile network page (Settings > Mobile network): 4G on/off and what the modem reports (stage 1 of
  * PLAN_4G.md: no data over 4G yet) */
-enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_DATA, CR_DATA_IP, CR_LINK, CR_USAGE, CR_APN, CR_IP, CR_ICCID, CR_IMSI,
+enum CellRow { CR_STATE, CR_OPER, CR_SIGNAL, CR_NET, CR_DATA, CR_DATA_IP, CR_LINK, CR_USAGE, CR_APN, CR_IP, CR_BAND, CR_CELL,
+               CR_QUAL, CR_ICCID, CR_IMSI,
                CR_IMEI, CR_MODEL, CR_COUNT };
 lv_obj_t *s_cellular_sw;
 lv_obj_t *s_cdata_sw;
@@ -1402,9 +1467,52 @@ void cellular_refresh()
     set_text_if_changed(s_cellular_vals[CR_NET], ci.act[0] ? ci.act : "--");
     set_text_if_changed(s_cellular_vals[CR_APN], ci.apn[0] ? ci.apn : "--");
     set_text_if_changed(s_cellular_vals[CR_IP], ci.ip[0] ? ci.ip : "--");
-    set_text_if_changed(s_cellular_vals[CR_ICCID], ci.iccid[0] ? ci.iccid : "--");
-    set_text_if_changed(s_cellular_vals[CR_IMSI], ci.imsi[0] ? ci.imsi : "--");
-    set_text_if_changed(s_cellular_vals[CR_IMEI], ci.imei[0] ? ci.imei : "--");
+    /* serving cell: "B3 · 1800 MHz", "PCI 68 · EARFCN 1300", "RSRQ -7.5 dB · SINR 11.0 dB" */
+    const bool cell = on && ci.state == PHONE_CELL_REGISTERED && ci.earfcn >= 0;
+    if (cell) {
+        static const struct {
+            int band;
+            const char *mhz;
+        } names[] = {{1, "2100"}, {3, "1800"}, {5, "850"}, {8, "900"}, {34, "2000 TDD"}, {38, "2600 TDD"},
+                     {39, "1900 TDD"}, {40, "2300 TDD"}, {41, "2500 TDD"}};
+        const char *mhz = nullptr;
+        for (const auto &n : names) {
+            if (n.band == ci.band) {
+                mhz = n.mhz;
+            }
+        }
+        if (mhz) {
+            snprintf(buf, sizeof(buf), "B%d  ·  %s MHz", ci.band, mhz);
+        } else {
+            strlcpy(buf, "?", sizeof(buf));
+        }
+    } else {
+        strlcpy(buf, "--", sizeof(buf));
+    }
+    set_text_if_changed(s_cellular_vals[CR_BAND], buf);
+    if (cell && ci.pci >= 0) {
+        snprintf(buf, sizeof(buf), "PCI %d  ·  EARFCN %d", ci.pci, ci.earfcn);
+    } else if (cell) {
+        snprintf(buf, sizeof(buf), "EARFCN %d", ci.earfcn);
+    } else {
+        strlcpy(buf, "--", sizeof(buf));
+    }
+    set_text_if_changed(s_cellular_vals[CR_CELL], buf);
+    if (cell) {
+        const auto tenths = [](char *out, size_t len, int v) {
+            snprintf(out, len, "%s%d.%d", v < 0 ? "-" : "", abs(v) / 10, abs(v) % 10);
+        };
+        char q[16], n[16];
+        tenths(q, sizeof(q), ci.rsrq_x10);
+        tenths(n, sizeof(n), ci.sinr_x10);
+        snprintf(buf, sizeof(buf), "RSRQ %s dB  ·  SINR %s dB", q, n);
+    } else {
+        strlcpy(buf, "--", sizeof(buf));
+    }
+    set_text_if_changed(s_cellular_vals[CR_QUAL], buf);
+    secret_set(SEC_ICCID, ci.iccid);
+    secret_set(SEC_IMSI, ci.imsi);
+    secret_set(SEC_IMEI, ci.imei);
     if (ci.model[0]) {
         snprintf(buf, sizeof(buf), "%s %s", ci.model, ci.firmware);
     } else {
@@ -1432,13 +1540,15 @@ void build_cellular_page(lv_obj_t *root)
     } rows[] = {
         {CR_STATE, "Trạng thái", "Status"}, {CR_OPER, "Nhà mạng", "Operator"}, {CR_SIGNAL, "Sóng", "Signal"},
         {CR_NET, "Mạng", "Network"}, {CR_DATA, "Internet qua 4G", "Internet over 4G"}, {CR_DATA_IP, "IP (PPP)", "IP (PPP)"},
-        {CR_LINK, "Kênh UART", "UART link"}, {CR_USAGE, "Đã dùng", "Used"}, {CR_APN, "APN", "APN"}, {CR_IP, "IP", "IP"}, {CR_ICCID, "ICCID", "ICCID"},
+        {CR_LINK, "Kênh UART", "UART link"}, {CR_USAGE, "Đã dùng", "Used"}, {CR_APN, "APN", "APN"}, {CR_IP, "IP", "IP"},
+        {CR_BAND, "Băng tần", "Band"}, {CR_CELL, "Trạm", "Cell"}, {CR_QUAL, "Chất lượng", "Quality"}, {CR_ICCID, "ICCID", "ICCID"},
         {CR_IMSI, "IMSI", "IMSI"}, {CR_IMEI, "IMEI", "IMEI"}, {CR_MODEL, "Module", "Module"},
     };
     const char *groups[] = {T("Trạng thái", "Status"), T("Dữ liệu (Wi-Fi được ưu tiên)", "Data (Wi-Fi comes first)"),
-                            T("Mạng cấp", "From the network"), "SIM", T("Module", "Module")};
-    const int first[] = {CR_STATE, CR_DATA, CR_APN, CR_ICCID, CR_IMEI, CR_COUNT};
-    for (int gi = 0; gi < 5; gi++) {
+                            T("Mạng cấp", "From the network"), T("Trạm phục vụ", "Serving cell"), "SIM",
+                            T("Module", "Module")};
+    const int first[] = {CR_STATE, CR_DATA, CR_APN, CR_BAND, CR_ICCID, CR_IMEI, CR_COUNT};
+    for (int gi = 0; gi < 6; gi++) {
         lv_obj_t *g = make_group(p, groups[gi]);
         for (int r = first[gi]; r < first[gi + 1]; r++) {
             lv_obj_t *v = kv_row(g, T(rows[r].vi, rows[r].en));
@@ -1448,6 +1558,9 @@ void build_cellular_page(lv_obj_t *root)
             lv_obj_set_style_text_align(v, LV_TEXT_ALIGN_RIGHT, 0);
             lv_label_set_text(v, "--");
             s_cellular_vals[rows[r].row] = v;
+            if (rows[r].row == CR_ICCID || rows[r].row == CR_IMSI || rows[r].row == CR_IMEI) {
+                secret_attach(rows[r].row == CR_ICCID ? SEC_ICCID : rows[r].row == CR_IMSI ? SEC_IMSI : SEC_IMEI, v);
+            }
             /* the row grows with a value on several lines instead of spilling over the next one */
             lv_obj_t *row = lv_obj_get_parent(v);
             lv_obj_set_height(row, LV_SIZE_CONTENT);
@@ -1823,6 +1936,7 @@ void build_ui()
     s_cellular_sw = nullptr;
     s_cdata_sw = nullptr;
     memset(s_cellular_vals, 0, sizeof(s_cellular_vals));
+    memset(s_secrets, 0, sizeof(s_secrets));
     s_cellular_hint = nullptr;
     s_usage_since = nullptr;
     s_cell_shown = SIZE_MAX;
@@ -2065,6 +2179,7 @@ void build_ui()
     for (int i = 0; i < 5; i++) {
         s_about_vals[i] = kv_row(dev, keys[i]);
     }
+    secret_attach(SEC_MAC, s_about_vals[4]);
     group_end(dev);
 
     lv_obj_t *sw = make_group(about, T("Phần mềm", "Software"));
@@ -2161,6 +2276,20 @@ bool PhoneSettings::resume()
         s_open_cell = false;
         show_page(PAGE_CELLULAR);
     }
+    phone_cell_set_detail(s_cur_page == PAGE_CELLULAR);
+    return true;
+}
+
+/* in the background or closed: the serving cell is no longer read */
+bool PhoneSettings::pause()
+{
+    phone_cell_set_detail(false);
+    return true;
+}
+
+bool PhoneSettings::close()
+{
+    phone_cell_set_detail(false);
     return true;
 }
 

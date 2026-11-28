@@ -50,6 +50,7 @@ esp_netif_t *s_ppp;                 // created once
 esp_modem_dce_t *s_dce;             // while the modem is powered
 esp_modem_dce_mode_t s_mode = ESP_MODEM_MODE_COMMAND;
 int s_baud = BAUD_BOOT;
+volatile bool s_detail;                         // the Mobile network page is open: read the serving cell
 std::atomic<bool> s_ppp_up;
 std::atomic<bool> s_ppp_lost;
 int64_t s_data_retry_at;
@@ -520,6 +521,23 @@ bool contrdp_ip(const char *resp, char *apn, size_t apn_len, char *out, size_t l
     return v6;
 }
 
+/* LTE band of a downlink EARFCN (3GPP 36.101), for the bands of the ML307C (AT+MBAND?); 0 when unknown */
+int lte_band(int earfcn)
+{
+    static const struct {
+        int band, first, last;
+    } bands[] = {
+        {1, 0, 599}, {3, 1200, 1949}, {5, 2400, 2649}, {8, 3450, 3799}, {34, 36200, 36349},
+        {38, 37750, 38249}, {39, 38250, 38649}, {40, 38650, 39649}, {41, 39650, 41589},
+    };
+    for (const auto &b : bands) {
+        if (earfcn >= b.first && earfcn <= b.last) {
+            return b.band;
+        }
+    }
+    return 0;
+}
+
 void poll_network()
 {
     char resp[256], line[160], v[64];
@@ -560,6 +578,23 @@ void poll_network()
             contrdp_ip(ctx, apn, sizeof(apn), ip, sizeof(ip));
         }
     }
+    /* serving cell, only while the Mobile network page is open: AT+MUESTATS="radio" of the ML307C gives
+     * "radio",<rat>,<rsrp>,<rssi>,<tx power>,<tx time>,<rx time>,<cell id>,<ecl>,<sinr>,<earfcn>,<pci>,<rsrq>
+     * (dB values in tenths; checked against AT+CESQ) */
+    int earfcn = -1, pci = -1, rsrq = 0, sinr = 0;
+    if (registered && s_detail && at("AT+MUESTATS=\"radio\"", resp, sizeof(resp)) &&
+        field(resp, "+MUESTATS:", line, sizeof(line))) {
+        item(line, 10, v, sizeof(v));
+        if (v[0]) {
+            earfcn = atoi(v);
+            item(line, 11, v, sizeof(v));
+            pci = v[0] ? atoi(v) : -1;
+            item(line, 12, v, sizeof(v));
+            rsrq = atoi(v);
+            item(line, 9, v, sizeof(v));
+            sinr = atoi(v);
+        }
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_info.state = registered ? PHONE_CELL_REGISTERED : stat == 3 ? PHONE_CELL_DENIED : PHONE_CELL_SEARCHING;
     s_info.roaming = stat == 5;
@@ -576,6 +611,11 @@ void poll_network()
             strlcpy(s_info.ip, ip, sizeof(s_info.ip));
         }
     }
+    s_info.earfcn = earfcn;
+    s_info.band = earfcn >= 0 ? lte_band(earfcn) : 0;
+    s_info.pci = pci;
+    s_info.rsrq_x10 = rsrq;
+    s_info.sinr_x10 = sinr;
     xSemaphoreGive(s_lock);
 }
 
@@ -746,6 +786,17 @@ extern "C" void phone_cell_set_enabled(bool on)
     s_want = on;
     if (s_task) {
         xTaskNotifyGive(s_task);
+    }
+}
+
+extern "C" void phone_cell_set_detail(bool on)
+{
+    if (s_detail == on) {
+        return;
+    }
+    s_detail = on;
+    if (on && s_task) {
+        xTaskNotifyGive(s_task);                    /* shown at once, not at the next poll */
     }
 }
 
