@@ -22,8 +22,25 @@ constexpr uint32_t COLOR_OFF = 0xE5484D;
 constexpr uint32_t COLOR_RESTART = 0x2F80ED;
 constexpr uint32_t COLOR_CANCEL = 0x3A4652;
 
+/* Low battery: warnings at 15 % and 5 %, power off below 2 % (or 3.3 V) when no USB supply keeps the board up.
+ * Without a battery the board runs from USB and none of this applies. */
+constexpr int LOW_WARN_PCT[] = {15, 5};
+constexpr int LOW_REARM_PCT = 3;             // a warning comes back after rising this much above its level
+constexpr int CRITICAL_PCT = 2;
+constexpr int CRITICAL_MV = 3300;
+constexpr int CRITICAL_READS = 3;            // consecutive readings (15 s), so a load dip does not power off
+constexpr int CRITICAL_COUNTDOWN_S = 10;
+
 lv_obj_t *s_menu;
 lv_obj_t *s_card;
+lv_timer_t *s_countdown;           // LVGL context
+lv_obj_t *s_countdown_label;
+int s_countdown_left;
+
+/* poll task only */
+bool s_warned[sizeof(LOW_WARN_PCT) / sizeof(LOW_WARN_PCT[0])];
+int s_critical_reads;
+bool s_critical_shown;
 
 portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 bsp_battery_info_t s_battery;      // guarded by s_lock
@@ -32,6 +49,11 @@ TaskHandle_t s_poll_task;
 
 void close_menu()
 {
+    if (s_countdown) {
+        lv_timer_delete(s_countdown);
+        s_countdown = nullptr;
+        s_countdown_label = nullptr;
+    }
     if (s_menu) {
         lv_obj_delete(s_menu);
         s_menu = nullptr;
@@ -79,6 +101,11 @@ void do_off(lv_timer_t *)
 void on_off(lv_event_t *)
 {
     ESP_LOGW(TAG, "Power off");
+    if (s_countdown) {
+        lv_timer_delete(s_countdown);
+        s_countdown = nullptr;
+        s_countdown_label = nullptr;
+    }
     show_busy(phone_tr("Đang tắt nguồn…", "Powering off…"));
     run_later(do_off, 400);
 }
@@ -114,12 +141,9 @@ void add_button(lv_obj_t *parent, const char *text, uint32_t color, lv_event_cb_
     lv_obj_center(l);
 }
 
-void show_menu(phone_power_action_t action)
+/* Dimmed full-screen layer with a card; on the system layer, so also above the lock screen */
+lv_obj_t *open_card(const char *title_text)
 {
-    if (s_menu) {
-        return;
-    }
-    /* System layer: also above the lock screen */
     s_menu = lv_obj_create(lv_layer_sys());
     lv_obj_remove_style_all(s_menu);
     lv_obj_set_size(s_menu, LV_PCT(100), LV_PCT(100));
@@ -143,6 +167,19 @@ void show_menu(phone_power_action_t action)
     lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(card);
+    lv_label_set_text(title, title_text);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(title, LV_PCT(100));
+    lv_obj_set_style_text_font(title, phone_font_by_size(28), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT), 0);
+    return card;
+}
+
+void show_menu(phone_power_action_t action)
+{
+    if (s_menu) {
+        return;
+    }
     const char *title_text = phone_tr("Nguồn", "Power");
     if (action == PHONE_POWER_OFF) {
         title_text = phone_tr("Tắt nguồn?", "Power off?");
@@ -153,11 +190,7 @@ void show_menu(phone_power_action_t action)
     } else if (action == PHONE_POWER_RESTART_NAV) {
         title_text = phone_tr("Khởi động lại để áp dụng cách điều hướng?", "Restart to apply the navigation?");
     }
-    lv_label_set_text(title, title_text);
-    lv_label_set_long_mode(title, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(title, LV_PCT(100));
-    lv_obj_set_style_text_font(title, phone_font_by_size(28), 0);
-    lv_obj_set_style_text_color(title, lv_color_hex(COLOR_TEXT), 0);
+    lv_obj_t *card = open_card(title_text);
 
     if (action == PHONE_POWER_MENU || action == PHONE_POWER_OFF) {
         add_button(card, phone_tr("Tắt nguồn", "Power off"), COLOR_OFF, on_off);
@@ -169,6 +202,141 @@ void show_menu(phone_power_action_t action)
     add_button(card, later ? phone_tr("Để sau", "Later") : phone_tr("Hủy", "Cancel"), COLOR_CANCEL, on_cancel);
 }
 
+/* ---------------- low battery (LVGL context) ---------------- */
+
+lv_obj_t *add_text(lv_obj_t *card, const char *text)
+{
+    lv_obj_t *l = lv_label_create(card);
+    lv_label_set_text(l, text);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(l, LV_PCT(100));
+    lv_obj_set_style_text_font(l, phone_font_by_size(22), 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(0xB8C2CC), 0);
+    return l;
+}
+
+void show_low_warning(int percent, bool usb)
+{
+    if (s_menu) {
+        return;     // the power menu or another dialog is up: skip this warning
+    }
+    char body[160];
+    if (usb) {
+        snprintf(body, sizeof(body), phone_tr("Còn %d%%. Nguồn USB không đủ, pin vẫn đang giảm.",
+                                              "%d%% left. The USB supply is too weak, the battery is still draining."),
+                 percent);
+    } else {
+        snprintf(body, sizeof(body), phone_tr("Còn %d%%. Hãy cắm sạc.", "%d%% left. Plug in the charger."), percent);
+    }
+    lv_obj_t *card = open_card(phone_tr("Pin yếu", "Low battery"));
+    add_text(card, body);
+    add_button(card, "OK", COLOR_CANCEL, on_cancel);
+}
+
+void countdown_text()
+{
+    char buf[160];
+    snprintf(buf, sizeof(buf), phone_tr("Máy sẽ tắt sau %d giây. Cắm sạc để tiếp tục dùng.",
+                                        "Powering off in %d s. Plug in the charger to keep using it."),
+             s_countdown_left);
+    lv_label_set_text(s_countdown_label, buf);
+}
+
+void countdown_tick(lv_timer_t *)
+{
+    /* keep the screen on during the countdown */
+    lv_display_trigger_activity(nullptr);
+    if (--s_countdown_left > 0) {
+        countdown_text();
+        return;
+    }
+    lv_timer_delete(s_countdown);
+    s_countdown = nullptr;
+    ESP_LOGW(TAG, "Battery empty, power off");
+    show_busy(phone_tr("Đang tắt nguồn…", "Powering off…"));
+    run_later(do_off, 400);
+}
+
+void show_critical()
+{
+    close_menu();
+    lv_obj_t *card = open_card(phone_tr("Pin sắp cạn", "Battery empty"));
+    s_countdown_left = CRITICAL_COUNTDOWN_S;
+    s_countdown_label = add_text(card, "");
+    countdown_text();
+    add_button(card, phone_tr("Tắt ngay", "Power off now"), COLOR_OFF, on_off);
+    s_countdown = lv_timer_create(countdown_tick, 1000, nullptr);
+}
+
+/* ---------------- low battery (poll task) ---------------- */
+
+void check_low_battery(const bsp_battery_info_t &b)
+{
+    /* No battery (runs from USB) or charging: nothing to warn about; a countdown on screen is cancelled */
+    const bool draining = b.state == BSP_BATTERY_DISCHARGING && b.percent >= 0;
+    if (!draining) {
+        s_critical_reads = 0;
+        for (bool &w : s_warned) {
+            w = false;
+        }
+        if (s_critical_shown) {
+            s_critical_shown = false;
+            ESP_LOGI(TAG, "Power off cancelled (%s)", b.state == BSP_BATTERY_ABSENT ? "no battery" : "charging");
+            if (bsp_display_lock(1000)) {
+                close_menu();
+                bsp_display_unlock();
+            }
+        }
+        return;
+    }
+
+    /* Power off only without USB: with a weak USB supply the PMIC would start again at once */
+    const bool critical = b.percent <= CRITICAL_PCT || (b.voltage_mv > 0 && b.voltage_mv < CRITICAL_MV);
+    s_critical_reads = critical && !b.vbus_present ? s_critical_reads + 1 : 0;
+    if (s_critical_reads >= CRITICAL_READS) {
+        if (!s_critical_shown) {
+            s_critical_shown = true;
+            ESP_LOGW(TAG, "Battery critical: %d%% %u mV", b.percent, b.voltage_mv);
+            phone_lock_wake();
+            if (bsp_display_lock(1000)) {
+                show_critical();
+                bsp_display_unlock();
+            }
+        }
+        return;
+    }
+    if (s_critical_shown && s_critical_reads == 0) {
+        /* USB came back (weak) or the reading recovered */
+        s_critical_shown = false;
+        if (bsp_display_lock(1000)) {
+            close_menu();
+            bsp_display_unlock();
+        }
+    }
+
+    /* Warnings: the lowest level reached, once until the battery rises above it again */
+    int level = -1;
+    for (size_t i = 0; i < sizeof(LOW_WARN_PCT) / sizeof(LOW_WARN_PCT[0]); i++) {
+        if (b.percent > LOW_WARN_PCT[i] + LOW_REARM_PCT) {
+            s_warned[i] = false;
+        }
+        if (b.percent <= LOW_WARN_PCT[i]) {
+            level = static_cast<int>(i);
+        }
+    }
+    if (level >= 0 && !s_warned[level]) {
+        for (int i = 0; i <= level; i++) {
+            s_warned[i] = true;     // reaching 5 % also covers the 15 % warning
+        }
+        ESP_LOGW(TAG, "Battery low: %d%% %u mV%s", b.percent, b.voltage_mv, b.vbus_present ? " (USB)" : "");
+        phone_lock_wake();
+        if (bsp_display_lock(1000)) {
+            show_low_warning(b.percent, b.vbus_present);
+            bsp_display_unlock();
+        }
+    }
+}
+
 void poll_task(void *)
 {
     for (;;) {
@@ -178,6 +346,7 @@ void poll_task(void *)
             s_battery = info;
             s_battery_valid = true;
             portEXIT_CRITICAL(&s_lock);
+            check_low_battery(info);
         }
         /* Woken early by USB and charger events */
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(BATTERY_POLL_MS));
