@@ -8,8 +8,8 @@ extern "C" {
 
 /**
  * Copy of the ESP_LOG output on the memory card, in /sdcard/system/logs/log_NNNN.txt: one file per boot
- * (a new one past 2 MB), the 10 newest kept. Lines wait in PSRAM (128 KB) until the card is mounted, so the
- * boot is in the file too; lines that do not fit are counted and noted in the file. printf output and the
+ * (a new one past 2 MB), the 10 newest kept; index.txt gives the date of each. Lines wait in PSRAM (128 KB)
+ * until the card is mounted, so the boot is in the file too; lines that do not fit are counted and noted in the file. printf output and the
  * panic dump (written by the ROM) are not in it: the next boot notes the reset reason.
  */
 

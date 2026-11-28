@@ -30,7 +30,7 @@ constexpr long FILE_MAX = 2 * 1024 * 1024;
 constexpr int KEEP_FILES = 10;
 constexpr int SYNC_MS = 5000;                   // fsync: what a crash or a pulled battery loses
 constexpr int RETRY_MS = 5000;                  // after a failed open or write
-constexpr int CLOCK_EVERY_S = 3600;             // wall clock note in the file
+constexpr int CLOCK_EVERY_S = 1800;             // wall clock note in the file
 constexpr const char *LOG_DIR = PHONE_SD_SYSTEM "/logs";
 constexpr const char *PREF_KEY = "sdlog";
 
@@ -52,6 +52,8 @@ long s_file_size;
 int64_t s_last_sync_us;
 int64_t s_retry_at_us;
 time_t s_last_clock;
+bool s_indexed;             // the file has its line in index.txt
+bool s_continued;           // the file follows a full one of the same boot
 
 /* ---------------- log hook (any task) ---------------- */
 
@@ -140,6 +142,22 @@ void write_note(const char *fmt, ...)
     }
 }
 
+/* index.txt: one line per file, with the date of its first clock note (the file names carry no date: the
+ * clock is usually not set yet when a file is opened). Files without a clock (no network) get no line. */
+void write_index(const char *when)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "%s/index.txt", LOG_DIR);
+    FILE *f = fopen(path, "a");
+    if (!f) {
+        return;
+    }
+    fprintf(f, "log_%04d.txt  %s  %s%s\n", s_file_no, when, s_continued ? "continued" : "reset: ",
+            s_continued ? "" : reset_reason());
+    fclose(f);
+    s_indexed = true;
+}
+
 void write_clock()
 {
     const time_t now = time(nullptr);
@@ -152,6 +170,9 @@ void write_clock()
     strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &tm);
     write_note("--- clock %s, up %lld s\n", when, esp_timer_get_time() / 1000000);
     s_last_clock = now;
+    if (!s_indexed) {
+        write_index(when);
+    }
 }
 
 /* Lowest and highest log_NNNN.txt numbers, and how many there are */
@@ -207,6 +228,8 @@ bool open_file(bool next)
             }
         }
         s_file_no = highest >= 9999 ? 1 : highest + 1;
+        s_indexed = false;
+        s_continued = next;
     }
     file_path(path, sizeof(path), s_file_no);
     s_file = fopen(path, "a");
@@ -217,8 +240,13 @@ bool open_file(bool next)
     s_file_size = ftell(s_file);
     if (fresh) {
         const esp_app_desc_t *app = esp_app_get_description();
-        write_note("=== %s %s, %s, reset: %s, up %lld ms\n", app->project_name, app->version, path,
-                   reset_reason(), esp_timer_get_time() / 1000);
+        if (next) {
+            write_note("=== %s %s, %s, continued (the previous file is full), up %lld ms\n", app->project_name,
+                       app->version, path, esp_timer_get_time() / 1000);
+        } else {
+            write_note("=== %s %s, %s, reset: %s, up %lld ms\n", app->project_name, app->version, path,
+                       reset_reason(), esp_timer_get_time() / 1000);
+        }
         write_clock();
     } else {
         write_note("--- card back, up %lld s\n", esp_timer_get_time() / 1000000);
